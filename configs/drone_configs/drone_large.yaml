@@ -1,0 +1,9 @@
+# configs/drone_configs/drone_large.yaml
+# A larger drone with a bigger body and longer moves but a tighter turn limit than drone_small.
+# dimensions_cm is the sphere diameter the drone can pass through (parsed into radius).
+
+drone_config:
+  dimensions_cm: 3
+  max_rotate_deg: 45
+  max_advance_cm: 3
+  max_elevate_cm: 3

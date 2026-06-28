@@ -1,0 +1,25 @@
+# sim_configs/sim_a.yaml
+# Environment A — single occupied voxel at array corner [4][4][4].
+# Map: single_voxel_x4_y4_z4.npy  (5×5×5, uint8), 10 cm/voxel.
+#
+# map_axes_offset turns world (0,0,0) into array position (20,20,20) cm = index
+# (2,2,2).  With offset 20 cm and a 50 cm map, the valid world range is
+#   [min = -offset, max = shape*res - offset) = [-20, 30) cm per axis.
+#
+# Drone starts at world (0,0,0): ix = floor((0 + 20)/10) = index (2,2,2) — an
+# Empty, in-bounds voxel (the occupied one is at index 4,4,4), facing +X (0°).
+# map_filename is resolved relative to this file's directory.
+
+simulation_config:
+  map_filename: ../../data_maps/single_voxel_x4_y4_z4.npy
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 0
+    y_cm: 0
+    height_cm: 0
+  initial_angle_deg: 0
+
+map_axes_offset:
+  x_offset: 20
+  y_offset: 20
+  height_offset: 20

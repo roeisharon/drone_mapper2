@@ -1,0 +1,19 @@
+# configs/mission_configs/benchmark_explore.yaml
+# Exploration mission for the benchmark map. The step budget is bounded so a run stays well under a
+# minute; raise it for fuller coverage if your machine has the headroom (staff target: < 1 minute).
+# boundaries cover the map's full world extent (report + validation metadata; Option A).
+
+mission_config:
+  max_steps: 12000
+  boundaries:
+    x_boundary:
+      min_cm: 0
+      max_cm: 29
+    y_boundary:
+      min_cm: 0
+      max_cm: 30
+    height_boundary:
+      min_cm: 0
+      max_cm: 31
+  gps_resolution_cm: 1
+  output_mapping_resolution_factor: 1

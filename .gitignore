@@ -1,0 +1,52 @@
+# Build outputs
+build/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+Testing/
+
+# vcpkg generated dependencies
+vcpkg_installed/
+vcpkg-manifest-install.log
+
+#legacy from assignment 1 and old skeleton code
+legacy/
+archive_old_skeleton/
+
+#guides
+CLAUDE.md
+assignment2_spec.pdf
+assignment1_spec.pdf
+docs/Advanced Topics - 06_ Testing.pptx
+docs/Error Code Key.xlsx
+docs/IMPLEMENTATION_PLAN.md
+docs/IMPLEMENTATION_SUMMARY.md
+docs/FORUM_CLARIFICATIONS.md
+
+# Binaries and libraries
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+
+# Editor and OS noise
+.vs/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.example.json
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

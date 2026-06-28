@@ -1,0 +1,23 @@
+# mission_configs/mission_a.yaml
+# Standard exploration mission: 500 steps, 10 cm GPS resolution (== map resolution,
+# so the output map is the same 5×5×5 grid as the hidden map).
+#
+# `boundaries` is the spec's region-to-map block. Since the 20.6 update it parses into
+# MissionConfigData.mission_bounds (report + validation metadata; scoring still uses the
+# map's full extent — Option A). Values match this map's world range after the offset in
+# sim_a.yaml: [-20, 30) cm per axis.
+
+mission_config:
+  max_steps: 5000
+  boundaries:
+    x_boundary:
+      min_cm: -20
+      max_cm: 30
+    y_boundary:
+      min_cm: -20
+      max_cm: 30
+    height_boundary:
+      min_cm: -20
+      max_cm: 30
+  gps_resolution_cm: 10
+  output_mapping_resolution_factor: 1

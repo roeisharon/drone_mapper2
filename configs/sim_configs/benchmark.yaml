@@ -1,0 +1,23 @@
+# configs/sim_configs/benchmark.yaml
+# Course-staff benchmark map (benchmark_map.npy), exported from ClassicCube (benchmark_map.cw).
+# Size (x,y,z) = (29,30,31) — deliberately odd to exercise parsing. The lower ~half is solid earth
+# (block id 3); the upper half is a house with a 2-voxel gap to the map edges, a main 4x4 entrance,
+# a roof secret entrance (2x1), a second floor (reached via a 4x4 opening behind a wall) holding
+# three rooms with 3x3 / 2x2 / 1x1 entrances. Block ids other than 0 are all treated as Occupied.
+#
+# 10 cm/voxel, no offset → world range [0,290) x [0,300) x [0,310) cm.
+# The drone starts in the open start area (4-voxel gap to the edges), standing on the ground:
+# voxel index (4,4,15) = world (45,45,155) cm, facing +X (east).
+
+simulation_config:
+  map_filename: ../../data_maps/benchmark_map.npy
+  map_resolution_cm: 1
+  initial_drone_position:
+    x_cm: 4
+    y_cm: 4
+    height_cm: 15
+  initial_angle_deg: 0
+  map_axes_offset_cm:
+    x_offset: 0
+    y_offset: 0
+    height_offset: 0

@@ -1,0 +1,9 @@
+# drone_configs/drone_small.yaml
+# A compact drone with conservative movement limits.
+# dimensions_cm is the sphere diameter the drone can pass through (maps to radius).
+
+drone_config:
+  dimensions_cm: 1
+  max_rotate_deg: 45
+  max_advance_cm: 5
+  max_elevate_cm: 5
