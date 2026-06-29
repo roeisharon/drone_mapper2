@@ -194,6 +194,17 @@ TEST_F(DroneControl, StepReturnsErrorWhenElevateFails) {
     EXPECT_EQ(result.message, "prop_fault");
 }
 
+// A collision refusal (DRONE_HITS_OBSTACLE) is routine exploration, not a fatal fault: the step
+// continues so the planner can reroute. This is what distinguishes it from a genuine movement fault
+// (motor_stall etc.), which still errors above.
+TEST_F(DroneControl, StepContinuesWhenMovementRefusedByCollision) {
+    using namespace ::testing;
+    ON_CALL(movement_, advance(_))
+        .WillByDefault(Return(drone_mapper::types::MovementResult{false, "DRONE_HITS_OBSTACLE"}));
+    const auto result = drone_->step();
+    EXPECT_EQ(result.status, drone_mapper::types::DroneStepStatus::Continue);
+}
+
 // Obstacle detection
 
 // Current cell Occupied → DRONE_HITS_OBSTACLE error.

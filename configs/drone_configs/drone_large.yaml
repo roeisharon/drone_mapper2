@@ -3,7 +3,7 @@
 # dimensions_cm is the sphere diameter the drone can pass through (parsed into radius).
 
 drone_config:
-  dimensions_cm: 3
+  dimensions_cm: 2
   max_rotate_deg: 45
-  max_advance_cm: 3
-  max_elevate_cm: 3
+  max_advance_cm: 2
+  max_elevate_cm: 2

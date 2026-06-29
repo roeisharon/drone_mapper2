@@ -26,6 +26,7 @@ docs/Error Code Key.xlsx
 docs/IMPLEMENTATION_PLAN.md
 docs/IMPLEMENTATION_SUMMARY.md
 docs/FORUM_CLARIFICATIONS.md
+docs/FORUM_CLARIFICATIONS2.md
 
 # Binaries and libraries
 *.exe
@@ -50,3 +51,5 @@ Thumbs.db
 
 # Logs
 *.log
+
+.devcontainer/

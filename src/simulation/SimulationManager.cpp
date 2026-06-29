@@ -41,18 +41,20 @@ bool missionBoundsInverted(const types::MappingBounds& b) {
     return b.min_x > b.max_x || b.min_y > b.max_y || b.min_height > b.max_height;
 }
 
-// Builds an error SimulationResult (score -1) carrying the configs and an optional error code.
+// Builds a failed-scenario SimulationResult: score -1 (the error sentinel) carrying the configs and,
+// when known, an error code + descriptive message so the report shows WHY the scenario failed.
 types::SimulationResult errorResult(const types::SimulationConfigData& simulation,
                                     const types::MissionConfigData& mission,
-                                    const std::string& code) {
+                                    const std::string& code,
+                                    const std::string& message) {
     types::SimulationResult r;
     r.simulation_config = simulation;
     r.mission_config    = mission;
     r.resolution_request_status = types::ResolutionRequestStatus::Ignored;
-    r.mission_score = -1.0;
+    r.mission_score = -1.0; // sentinel: this scenario errored and was not scored
     if (!code.empty()) {
         r.mission_results.push_back(types::MissionRunResult{
-            types::MissionRunStatus::Error, 0, {{code, code}}});
+            types::MissionRunStatus::Error, 0, {{code, message}}});
     }
     return r;
 }
@@ -71,12 +73,20 @@ types::SimulationManagerReport SimulationManager::run(
     ErrorLogger logger{output_path / "simulation_manager_errors.log"};
 
     // Cartesian product per simulation group: missions × drones × lidars.
-    // Group-failure: if the factory throws for a combination, every remaining combination in THAT
-    // simulation group is filled with score -1 without calling the factory again. Other groups run
-    // normally. A mission whose boundaries are invalid fails all its combinations with
-    // MISSION_BOUNDARY_INVALID (steps 0, score -1) and never calls the factory.
+    // Failure handling (both per the spec):
+    //   - A single scenario that fails is scored -1 with its error code and the loop CONTINUES to the
+    //     next scenario (a mission that errors mid-run already returns a -1 SimulationResult from
+    //     SimulationRunImpl; the manager simply keeps going).
+    //   - When an entire group cannot run — e.g. its map file fails to load, which the factory hits
+    //     for every combination sharing that simulation — the first failure marks the whole group
+    //     failed and every remaining combination is auto-filled with score -1 and the SAME error code,
+    //     without calling the factory again. Other groups are unaffected.
+    //   - A mission whose boundaries are inverted fails all of its own combinations with
+    //     MISSION_BOUNDARY_INVALID (steps 0, score -1) and never calls the factory.
     for (const auto& [simulation, missions] : composition.simulation_mission_groups) {
-        bool group_failed = false;
+        bool        group_failed = false;
+        std::string group_code;    // error code shared by every auto-filled scenario in a dead group
+        std::string group_message; // human-readable cause (e.g. the map-load error text)
 
         for (const types::MissionConfigData& mission : missions) {
             const bool bounds_invalid = missionBoundsInverted(mission.mission_bounds);
@@ -88,20 +98,25 @@ types::SimulationManagerReport SimulationManager::run(
             for (const types::DroneConfigData& drone : composition.drones) {
                 for (const types::LidarConfigData& lidar : composition.lidars) {
                     if (group_failed) {
-                        runs.push_back(errorResult(simulation, mission, ""));
+                        runs.push_back(errorResult(simulation, mission, group_code, group_message));
                         continue;
                     }
                     if (bounds_invalid) {
-                        runs.push_back(errorResult(simulation, mission, "MISSION_BOUNDARY_INVALID"));
+                        runs.push_back(errorResult(simulation, mission, "MISSION_BOUNDARY_INVALID",
+                                                   "mission boundaries are inverted"));
                         continue;
                     }
                     try {
                         auto run_ptr = run_factory_->create(simulation, mission, drone, lidar, output_path);
                         runs.push_back(run_ptr->run());
                     } catch (const std::exception& e) {
-                        group_failed = true;
-                        try { logger.log("FACTORY_ERROR", e.what()); } catch (...) {}
-                        runs.push_back(errorResult(simulation, mission, ""));
+                        // Run setup failed (commonly a bad/missing map file). Treat as group-wide:
+                        // record the code now and reuse it for the rest of the group.
+                        group_failed  = true;
+                        group_code    = "FACTORY_ERROR";
+                        group_message = e.what();
+                        try { logger.log(group_code, group_message); } catch (...) {}
+                        runs.push_back(errorResult(simulation, mission, group_code, group_message));
                     }
                 }
             }

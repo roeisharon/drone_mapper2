@@ -96,9 +96,16 @@ types::DroneStepResult DroneControlImpl::step() {
             ScanResultToVoxels::applyToMap(output_map_, scan_pos, scan_heading, new_scan, lidar_.config());
         }
 
-        // 7. Advance the step counter; a failed movement is a step-level error.
+        // 7. Advance the step counter. A collision refusal (DRONE_HITS_OBSTACLE) is a routine part
+        //    of exploration, NOT a mission failure: the optimistic planner probes an unmapped cell
+        //    the movement layer knows is solid/too-narrow, the drone simply stays put, and the next
+        //    scan maps that obstacle so the planner reroutes around it. Any OTHER movement failure
+        //    is a genuine fault and still surfaces as a step error.
         ++step_index_;
         if (!move_result.success) {
+            if (move_result.message == "DRONE_HITS_OBSTACLE") {
+                return {types::DroneStepStatus::Continue, {}};
+            }
             return {types::DroneStepStatus::Error, move_result.message};
         }
         return {types::DroneStepStatus::Continue, {}};

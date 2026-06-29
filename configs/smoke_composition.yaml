@@ -13,6 +13,8 @@ simulation_compositions:
 
   drone_configs:
     - drone_configs/drone_small.yaml
+    - drone_configs/drone_large.yaml
 
   lidar_configs:
     - lidar_configs/lidar_a.yaml
+    - lidar_configs/lidar_b.yaml

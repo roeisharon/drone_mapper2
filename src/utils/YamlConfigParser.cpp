@@ -110,8 +110,9 @@ types::DroneConfigData parseDroneConfig(const std::filesystem::path& path, Error
     const auto doc = unwrap(loadFile(path, logger), "drone_config");
 
     types::DroneConfigData cfg;
-    // Spec key `dimensions_cm` maps to the frozen DroneConfigData.radius (drone modelled as a sphere).
-    cfg.radius      = reqField<double>(doc, "dimensions_cm",  0.0, ctx, logger) * cm;
+    // The drone is modelled as a sphere. Spec key `dimensions_cm` is its DIAMETER (the opening width
+    // it can pass through), so the stored DroneConfigData.radius is half that.
+    cfg.radius      = reqField<double>(doc, "dimensions_cm",  0.0, ctx, logger) / 2 * cm;
     cfg.max_rotate  = reqField<double>(doc, "max_rotate_deg", 0.0, ctx, logger) * horizontal_angle[deg];
     cfg.max_advance = reqField<double>(doc, "max_advance_cm", 0.0, ctx, logger) * cm;
     cfg.max_elevate = reqField<double>(doc, "max_elevate_cm", 0.0, ctx, logger) * cm;

@@ -68,7 +68,9 @@ private:
     [[nodiscard]] Position3D gridToWorld(const GridCell& cell) const noexcept;
     // Enqueue all 6-connected neighbours that are unvisited, not already queued, and navigable.
     //void expandNeighbors(const GridCell& cell);
-    // True iff the cell is in-bounds and not a known obstacle (Occupied/PotentiallyOccupied).
+    // True iff the cell is in-bounds, not a known obstacle (Occupied/PotentiallyOccupied), AND the
+    // drone's spherical footprint (drone_config_.radius) fits there without overlapping an obstacle.
+    // With a zero radius this reduces to the plain single-cell test.
     [[nodiscard]] bool isNavigable(const GridCell& cell) const noexcept;
 };
 

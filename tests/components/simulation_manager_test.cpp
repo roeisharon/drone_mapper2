@@ -275,6 +275,37 @@ TEST_F(SimulationManager, FactoryExceptionCreatesErrorLog) {
     EXPECT_NE(content.find("explode_message"), std::string::npos);
 }
 
+// A failed scenario is scored -1 AND carries an error code + descriptive message (the cause), not a
+// blank result — so the report shows why it failed.
+TEST_F(SimulationManager, FactoryExceptionResultCarriesErrorCode) {
+    ON_CALL(*factory_, create(_, _, _, _, _))
+        .WillByDefault(Throw(std::runtime_error("Failed to load NPY file: missing.npy")));
+    const auto report = manager_->run(makeComposition(1, 1, 1, 1), out_dir_);
+    ASSERT_EQ(report.runs.size(), 1u);
+    EXPECT_DOUBLE_EQ(report.runs[0].mission_score, -1.0);
+    ASSERT_FALSE(report.runs[0].mission_results.empty());
+    ASSERT_FALSE(report.runs[0].mission_results[0].errors.empty());
+    EXPECT_EQ(report.runs[0].mission_results[0].errors.front().code, "FACTORY_ERROR");
+    EXPECT_NE(report.runs[0].mission_results[0].errors.front().message.find("missing.npy"),
+              std::string::npos);
+}
+
+// When a whole group is auto-filled after a setup failure, EVERY filled scenario carries the same
+// error code (not a blank one), so the group's failure is fully explained in the report.
+TEST_F(SimulationManager, GroupFillScenariosCarryErrorCode) {
+    EXPECT_CALL(*factory_, create(_, _, _, _, _))
+        .Times(1)
+        .WillOnce(Throw(std::runtime_error("bad map file")));
+    const auto report = manager_->run(makeComposition(1, 1, 1, 3), out_dir_);
+    ASSERT_EQ(report.runs.size(), 3u);
+    for (const auto& r : report.runs) {
+        EXPECT_DOUBLE_EQ(r.mission_score, -1.0);
+        ASSERT_FALSE(r.mission_results.empty());
+        ASSERT_FALSE(r.mission_results[0].errors.empty());
+        EXPECT_EQ(r.mission_results[0].errors.front().code, "FACTORY_ERROR");
+    }
+}
+
 // Mission boundary validation
 
 // A mission with inverted boundaries fails all its combos with MISSION_BOUNDARY_INVALID and never

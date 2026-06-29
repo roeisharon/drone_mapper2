@@ -67,7 +67,10 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
         simulation.initial_drone_position,
         Orientation{simulation.initial_angle, 0.0 * altitude_angle[deg]},
         mission.gps_resolution);
-    auto movement = std::make_unique<MockMovement>(*gps);
+    // MockMovement validates moves against the hidden ground-truth map using the drone's radius, so
+    // a drone that does not fit physically cannot move into the space (collision ownership lives here,
+    // the low-churn HLD option, keeping the hidden map a live dependency).
+    auto movement = std::make_unique<MockMovement>(*gps, *hidden_map, drone.radius);
     // MockLidar ray-marches against the hidden map using the live GPS pose.
     auto lidar_impl = std::make_unique<MockLidar>(lidar, *hidden_map, *gps);
     // MappingAlgorithmImpl plans off the output map; the base ctor stores mission/lidar/drone configs.

@@ -1,6 +1,7 @@
 #include <drone_mapper/drone/MappingAlgorithmImpl.h>
 
 #include <drone_mapper/map/IMap3D.h>
+#include <drone_mapper/utils/DroneFootprint.h>
 
 #include <algorithm>
 #include <array>
@@ -70,10 +71,22 @@ bool MappingAlgorithmImpl::isNavigable(const GridCell& cell) const noexcept {
     // without this the frontier leaks into the infinite empty space outside the map and the
     // algorithm never returns Finished. PotentiallyOccupied is an obstacle too: the drone must
     // not navigate into a too-close, uncertain detection (collision safety).
-    const types::VoxelOccupancy v = output_map_.atVoxel(gridToWorld(cell));
-    return v != types::VoxelOccupancy::Occupied &&
-           v != types::VoxelOccupancy::PotentiallyOccupied &&
-           v != types::VoxelOccupancy::OutOfBounds;
+    const Position3D center = gridToWorld(cell);
+    const types::VoxelOccupancy v = output_map_.atVoxel(center);
+    if (v == types::VoxelOccupancy::Occupied ||
+        v == types::VoxelOccupancy::PotentiallyOccupied ||
+        v == types::VoxelOccupancy::OutOfBounds) {
+        return false;
+    }
+    // The cell itself is free, but the drone is a sphere of drone_config_.radius — it can only
+    // occupy this cell if its full footprint clears every known obstacle. This stops the planner
+    // routing a large drone through gaps a point-sized drone could slip through. With a zero
+    // radius (default config) this reduces to the single-cell test above.
+    return footprintFits(output_map_, center, drone_config_.radius,
+                         [](types::VoxelOccupancy occ) {
+                             return occ == types::VoxelOccupancy::Occupied ||
+                                    occ == types::VoxelOccupancy::PotentiallyOccupied;
+                         });
 }
 
 // void MappingAlgorithmImpl::expandNeighbors(const GridCell& cell) {
@@ -166,10 +179,11 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
         for (const auto& nb : neighbors) {
             if (bfs_visited.count(nb) || in_frontier_.count(nb)) continue;
 
-            auto nb_occ = output_map_.atVoxel(gridToWorld(nb));
-            
-            // Queue it if it is Empty OR Unmapped.
-            if (nb_occ == types::VoxelOccupancy::Empty || nb_occ == types::VoxelOccupancy::Unmapped) {
+            // Enqueue only cells the drone can physically occupy: in-bounds, Empty/Unmapped, and
+            // with the full spherical footprint clearing known obstacles (isNavigable). This keeps
+            // the planned path width-aware — a large drone never routes through a gap too narrow
+            // for its body, while a point-sized drone behaves exactly as before.
+            if (isNavigable(nb)) {
                 bfs_visited.insert(nb);
                 parent[nb] = c;
                 q.push(nb);
@@ -190,21 +204,21 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
         curr = parent[curr];
     }
     std::reverse(path.begin(), path.end());
-    
-    GridCell immediate_step = path[0]; 
+
+    GridCell immediate_step = path[0];
     GridCell target_cell = immediate_step;
-    
+
     // Jump up to 50cm if the hallway ahead is verified empty
     if (path.size() > 1) {
         int dx = path[0].x - current.x;
         int dy = path[0].y - current.y;
         int dz = path[0].z - current.z;
-        
+
         for (size_t i = 1; i < std::min(path.size(), (size_t)5); ++i) {
             if (path[i].x - path[i-1].x == dx &&
                 path[i].y - path[i-1].y == dy &&
                 path[i].z - path[i-1].z == dz) {
-                
+
                 if (output_map_.atVoxel(gridToWorld(path[i])) == types::VoxelOccupancy::Empty) {
                     target_cell = path[i];
                 } else {

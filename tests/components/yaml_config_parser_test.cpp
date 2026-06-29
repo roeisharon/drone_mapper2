@@ -58,12 +58,13 @@ protected:
 // parseDroneConfig
 
 // A fully specified flat drone config populates every field with the exact (unit-converted) value.
+// `dimensions_cm` is the drone's sphere DIAMETER (per the config spec); radius = diameter / 2.
 TEST_F(YamlConfigParser, DroneConfigAllFieldsParsed) {
     const auto p = write("drone.yaml",
                          "dimensions_cm: 30\nmax_rotate_deg: 45\nmax_advance_cm: 50\nmax_elevate_cm: 40\n");
     auto logger = makeLogger();
     const auto cfg = parseDroneConfig(p, logger);
-    EXPECT_DOUBLE_EQ(cfg.radius.numerical_value_in(cm), 30.0);
+    EXPECT_DOUBLE_EQ(cfg.radius.numerical_value_in(cm), 15.0); // 30 cm diameter → 15 cm radius
     EXPECT_DOUBLE_EQ(cfg.max_rotate.numerical_value_in(deg), 45.0);
     EXPECT_DOUBLE_EQ(cfg.max_advance.numerical_value_in(cm), 50.0);
     EXPECT_DOUBLE_EQ(cfg.max_elevate.numerical_value_in(cm), 40.0);
@@ -77,7 +78,7 @@ TEST_F(YamlConfigParser, DroneConfigWrappedFormParsed) {
                          "  max_advance_cm: 20\n  max_elevate_cm: 5\n");
     auto logger = makeLogger();
     const auto cfg = parseDroneConfig(p, logger);
-    EXPECT_DOUBLE_EQ(cfg.radius.numerical_value_in(cm), 12.0);
+    EXPECT_DOUBLE_EQ(cfg.radius.numerical_value_in(cm), 6.0); // 12 cm diameter → 6 cm radius
     EXPECT_DOUBLE_EQ(cfg.max_elevate.numerical_value_in(cm), 5.0);
 }
 
@@ -86,7 +87,7 @@ TEST_F(YamlConfigParser, DroneConfigMissingFieldLogsAndDefaults) {
     const auto p = write("drone.yaml", "dimensions_cm: 30\n"); // others missing
     auto logger = makeLogger();
     const auto cfg = parseDroneConfig(p, logger);
-    EXPECT_DOUBLE_EQ(cfg.radius.numerical_value_in(cm), 30.0);
+    EXPECT_DOUBLE_EQ(cfg.radius.numerical_value_in(cm), 15.0); // 30 cm diameter → 15 cm radius
     EXPECT_DOUBLE_EQ(cfg.max_advance.numerical_value_in(cm), 0.0);
     EXPECT_TRUE(logExists());
 }

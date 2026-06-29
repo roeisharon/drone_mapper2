@@ -16,7 +16,6 @@
 
 simulation_compositions:
   simulations:
-
     - simulation_config: sim_configs/benchmark.yaml
       mission_configs:
         - mission_configs/benchmark_explore.yaml

@@ -1,10 +1,14 @@
 #include <gtest/gtest.h>
 
 #include <drone_mapper/Units.h>
+#include <drone_mapper/map/Map3DImpl.h>
 
 #include "fixtures/SimulationRunFixture.h"
 
+#include <TinyNPY.h>
+
 #include <cmath>
+#include <memory>
 
 // These tests verify the real MockGPS + MockMovement behaviour. Per the spec they belong to the
 // SimulationRun suite (so --gtest_filter=SimulationRun.* covers the GPS/movement mocks), sharing
@@ -174,4 +178,126 @@ TEST_F(SimulationRun, SetHeadingUpdatesHeading) {
     gps.setHeading({90.0 * deg, 5.0 * deg});
     EXPECT_DOUBLE_EQ(gps.heading().horizontal.numerical_value_in(deg), 90.0);
     EXPECT_DOUBLE_EQ(gps.heading().altitude.numerical_value_in(deg), 5.0);
+}
+
+// movement collision against the hidden ground-truth map (drone size) ----------
+
+namespace {
+
+// A 1 cm/voxel hidden map, all Unmapped, sized side_cm per axis. Caller marks walls with setOcc().
+Map3DImpl makeHiddenMap(double side_cm = 10.0) {
+    types::MapConfig cfg;
+    cfg.resolution = 1.0 * cm;
+    cfg.offset     = Position3D{};
+    cfg.boundaries = {
+        0.0 * x_extent[cm], side_cm * x_extent[cm],
+        0.0 * y_extent[cm], side_cm * y_extent[cm],
+        0.0 * z_extent[cm], side_cm * z_extent[cm],
+    };
+    return Map3DImpl(std::make_shared<NpyArray>(), cfg);
+}
+
+// Marks grid cell (ix,iy,iz) Occupied (addresses the cell centre so atVoxel is unambiguous).
+void setOcc(Map3DImpl& m, int ix, int iy, int iz) {
+    m.set({(static_cast<double>(ix) + 0.5) * x_extent[cm],
+           (static_cast<double>(iy) + 0.5) * y_extent[cm],
+           (static_cast<double>(iz) + 0.5) * z_extent[cm]},
+          types::VoxelOccupancy::Occupied);
+}
+
+// World position at the centre of grid cell (ix,iy,iz) for a 1 cm/voxel map.
+Position3D cellCentre(int ix, int iy, int iz) {
+    return {(static_cast<double>(ix) + 0.5) * x_extent[cm],
+            (static_cast<double>(iy) + 0.5) * y_extent[cm],
+            (static_cast<double>(iz) + 0.5) * z_extent[cm]};
+}
+
+} // namespace
+
+// A large drone (radius 1 cm) advancing toward a wall one voxel ahead is refused: the footprint
+// would overlap the Occupied voxel, so the position does not change and the result reports failure.
+TEST_F(SimulationRun, AdvanceRefusedWhenLargeDroneFootprintHitsWall) {
+    Map3DImpl hidden = makeHiddenMap();
+    for (int y = 0; y <= 4; ++y)
+        for (int z = 0; z <= 4; ++z)
+            setOcc(hidden, 3, y, z); // wall plane at x = 3
+
+    MockGPS g{cellCentre(1, 2, 2), {0.0 * deg, 0.0 * deg}, 1.0 * cm}; // facing +X
+    MockMovement mv{g, hidden, 1.0 * cm};
+
+    const auto result = mv.advance(1.0 * cm); // dest = centre of cell (2,2,2), adjacent to the wall
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.message, "DRONE_HITS_OBSTACLE");
+    EXPECT_DOUBLE_EQ(g.position().x.numerical_value_in(cm), 1.5) << "drone must not have moved";
+}
+
+// A small drone (radius 0.5 cm) makes the same move: its footprint only touches the wall face, which
+// still fits, so the advance succeeds and the position updates.
+TEST_F(SimulationRun, AdvanceAllowedForSmallDroneInSameGap) {
+    Map3DImpl hidden = makeHiddenMap();
+    for (int y = 0; y <= 4; ++y)
+        for (int z = 0; z <= 4; ++z)
+            setOcc(hidden, 3, y, z);
+
+    MockGPS g{cellCentre(1, 2, 2), {0.0 * deg, 0.0 * deg}, 1.0 * cm};
+    MockMovement mv{g, hidden, 0.5 * cm};
+
+    const auto result = mv.advance(1.0 * cm);
+    EXPECT_TRUE(result.success);
+    EXPECT_DOUBLE_EQ(g.position().x.numerical_value_in(cm), 2.5);
+}
+
+// With no obstacle ahead, even the large drone advances normally (collision check is not a blanket
+// veto — it only fires on real geometry).
+TEST_F(SimulationRun, AdvanceSucceedsInOpenSpaceForLargeDrone) {
+    Map3DImpl hidden = makeHiddenMap(); // all Unmapped, no walls
+
+    MockGPS g{cellCentre(1, 2, 2), {0.0 * deg, 0.0 * deg}, 1.0 * cm};
+    MockMovement mv{g, hidden, 1.0 * cm};
+
+    const auto result = mv.advance(1.0 * cm);
+    EXPECT_TRUE(result.success);
+    EXPECT_DOUBLE_EQ(g.position().x.numerical_value_in(cm), 2.5);
+}
+
+// elevate() is collision-checked too: a large drone climbing into a ceiling one voxel above is refused.
+TEST_F(SimulationRun, ElevateRefusedWhenLargeDroneFootprintHitsCeiling) {
+    Map3DImpl hidden = makeHiddenMap();
+    for (int x = 0; x <= 4; ++x)
+        for (int y = 0; y <= 4; ++y)
+            setOcc(hidden, x, y, 3); // ceiling plane at z = 3
+
+    MockGPS g{cellCentre(2, 2, 1), {0.0 * deg, 0.0 * deg}, 1.0 * cm};
+    MockMovement mv{g, hidden, 1.0 * cm};
+
+    const auto result = mv.elevate(1.0 * cm); // dest = centre of cell (2,2,2), under the ceiling
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.message, "DRONE_HITS_OBSTACLE");
+    EXPECT_DOUBLE_EQ(g.position().z.numerical_value_in(cm), 1.5);
+}
+
+// The same climb succeeds for a small drone whose footprint clears the ceiling.
+TEST_F(SimulationRun, ElevateAllowedForSmallDroneUnderSameCeiling) {
+    Map3DImpl hidden = makeHiddenMap();
+    for (int x = 0; x <= 4; ++x)
+        for (int y = 0; y <= 4; ++y)
+            setOcc(hidden, x, y, 3);
+
+    MockGPS g{cellCentre(2, 2, 1), {0.0 * deg, 0.0 * deg}, 1.0 * cm};
+    MockMovement mv{g, hidden, 0.5 * cm};
+
+    const auto result = mv.elevate(1.0 * cm);
+    EXPECT_TRUE(result.success);
+    EXPECT_DOUBLE_EQ(g.position().z.numerical_value_in(cm), 2.5);
+}
+
+// Back-compat: the plain (gps-only) constructor performs no collision checking, so a move that the
+// collision-aware ctor would refuse still succeeds. Guards the always-succeeds path the fixture relies on.
+TEST_F(SimulationRun, PlainCtorMovementSkipsCollisionChecking) {
+    MockGPS g{cellCentre(1, 2, 2), {0.0 * deg, 0.0 * deg}, 1.0 * cm};
+    MockMovement mv{g}; // no hidden map injected
+
+    const auto result = mv.advance(1.0 * cm);
+    EXPECT_TRUE(result.success);
+    EXPECT_DOUBLE_EQ(g.position().x.numerical_value_in(cm), 2.5);
 }

@@ -7,6 +7,7 @@
 #include <cmath>
 #include <map>
 #include <numbers>
+#include <set>
 #include <tuple>
 
 // A simple IMap3D backed by a std::map of (ix, iy, iz) → VoxelOccupancy, so tests can inject
@@ -547,4 +548,147 @@ TEST_F(MappingAlgorithm, DoesNotEnterCellRevealedOccupied) {
     } else {
         EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Finished);
     }
+}
+
+// Drone footprint (radius) awareness ------------------------------------------------------------
+
+namespace {
+
+using drone_mapper::types::DroneConfigData;
+using drone_mapper::types::LidarConfigData;
+using drone_mapper::types::MissionConfigData;
+
+// A DroneConfigData whose only meaningful field for these tests is the sphere radius (cm).
+DroneConfigData droneWithRadius(double radius_cm) {
+    using namespace drone_mapper;
+    DroneConfigData d{};
+    d.radius = radius_cm * cm;
+    return d;
+}
+
+// Builds a 1 cm/voxel world: a sealed 3x3x3 Empty chamber (cells [1..3]^3) inside an Occupied shell,
+// with a single 1-voxel exit carved at (4,2,2) opening onto Unmapped space (cells 5..6). Bounds are
+// [0..6] so exploration terminates. A point/small drone can slip out through the exit; a drone whose
+// radius spans a whole voxel cannot fit the gap (its body would overlap the shell).
+TestMap makeChamberWithNarrowExit() {
+    using V = drone_mapper::types::VoxelOccupancy;
+    TestMap m{1.0};
+    m.setGridBounds(0, 6);
+    for (int x = 0; x <= 4; ++x)
+        for (int y = 0; y <= 4; ++y)
+            for (int z = 0; z <= 4; ++z) {
+                const bool inside = x >= 1 && x <= 3 && y >= 1 && y <= 3 && z >= 1 && z <= 3;
+                m.setVoxel(posAt(x, y, z), inside ? V::Empty : V::Occupied);
+            }
+    m.setVoxel(posAt(4, 2, 2), V::Empty); // carve the single 1-voxel exit
+    return m;
+}
+
+// Drives the algorithm from a start cell-centre and records every grid cell the drone occupies.
+std::set<std::tuple<int, int, int>> reachedCells(drone_mapper::MappingAlgorithmImpl& algo,
+                                                 double x0, double y0, double z0, int cap = 4000) {
+    using namespace drone_mapper;
+    using T = types::MovementCommandType;
+    double x = x0, y = y0, z = z0, heading = 0.0;
+    std::set<std::tuple<int, int, int>> cells;
+    const auto record = [&] {
+        cells.insert({static_cast<int>(std::floor(x)),
+                      static_cast<int>(std::floor(y)),
+                      static_cast<int>(std::floor(z))});
+    };
+    record();
+    for (int i = 0; i < cap; ++i) {
+        const auto cmd = algo.nextStep(stateAt(x, y, z, heading), nullptr);
+        if (cmd.status == types::AlgorithmStatus::Finished) break;
+        if (cmd.movement) {
+            const auto& mv = *cmd.movement;
+            if (mv.type == T::Rotate) {
+                const double a = mv.angle.numerical_value_in(deg);
+                heading += (mv.rotation == types::RotationDirection::Left) ? a : -a;
+                while (heading >= 360.0) heading -= 360.0;
+                while (heading <    0.0) heading += 360.0;
+            } else if (mv.type == T::Advance) {
+                const double d = mv.distance.numerical_value_in(cm);
+                const double r = heading * std::numbers::pi / 180.0;
+                x += d * std::cos(r);
+                y += d * std::sin(r);
+            } else if (mv.type == T::Elevate) {
+                z += mv.distance.numerical_value_in(cm);
+            }
+        }
+        record();
+    }
+    return cells;
+}
+
+// True if any reached cell has grid-x >= threshold (i.e. the drone escaped the chamber).
+bool reachedBeyondX(const std::set<std::tuple<int, int, int>>& cells, int threshold) {
+    for (const auto& c : cells) {
+        if (std::get<0>(c) >= threshold) return true;
+    }
+    return false;
+}
+
+} // namespace
+
+// A point-sized drone (radius 0) navigates out through the 1-voxel exit (baseline / no regression).
+TEST_F(MappingAlgorithm, PointDroneExitsThroughOneVoxelGap) {
+    TestMap chamber = makeChamberWithNarrowExit();
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    DroneConfigData   d = droneWithRadius(0.0);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, chamber};
+
+    const auto cmd = algo.nextStep(stateAt(2.5, 2.5, 2.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working);
+    EXPECT_TRUE(cmd.movement.has_value()) << "a point drone must plan a move toward the exit";
+}
+
+// A small drone (radius 0.5 cm = 1-voxel diameter) still fits the 1-voxel exit and plans to leave.
+TEST_F(MappingAlgorithm, SmallDroneExitsThroughOneVoxelGap) {
+    TestMap chamber = makeChamberWithNarrowExit();
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    DroneConfigData   d = droneWithRadius(0.5);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, chamber};
+
+    const auto cmd = algo.nextStep(stateAt(2.5, 2.5, 2.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working);
+    ASSERT_TRUE(cmd.movement.has_value());
+}
+
+// A large drone (radius 1.0 cm = 2-voxel diameter) cannot fit the 1-voxel exit, nor even move to a
+// chamber-edge cell (its body would overlap the shell), so the planner finds no navigable frontier
+// and returns Finished without commanding a move.
+TEST_F(MappingAlgorithm, LargeDroneCannotExitThroughOneVoxelGap) {
+    TestMap chamber = makeChamberWithNarrowExit();
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    DroneConfigData   d = droneWithRadius(1.0);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, chamber};
+
+    const auto cmd = algo.nextStep(stateAt(2.5, 2.5, 2.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Finished);
+    EXPECT_FALSE(cmd.movement.has_value());
+}
+
+// End-to-end on the same world: the small drone escapes the chamber (reaches cells beyond the exit),
+// the large drone does not — different drone sizes yield different reachable areas.
+TEST_F(MappingAlgorithm, DifferentDroneSizesReachDifferentAreas) {
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+
+    TestMap chamber_small = makeChamberWithNarrowExit();
+    DroneConfigData d_small = droneWithRadius(0.5);
+    drone_mapper::MappingAlgorithmImpl algo_small{mc, lc, d_small, chamber_small};
+    const auto reached_small = reachedCells(algo_small, 2.5, 2.5, 2.5);
+
+    TestMap chamber_large = makeChamberWithNarrowExit();
+    DroneConfigData d_large = droneWithRadius(1.0);
+    drone_mapper::MappingAlgorithmImpl algo_large{mc, lc, d_large, chamber_large};
+    const auto reached_large = reachedCells(algo_large, 2.5, 2.5, 2.5);
+
+    EXPECT_TRUE(reachedBeyondX(reached_small, 4)) << "small drone should escape the chamber";
+    EXPECT_FALSE(reachedBeyondX(reached_large, 4)) << "large drone must stay confined";
+    EXPECT_GT(reached_small.size(), reached_large.size());
 }

@@ -227,6 +227,30 @@ TEST_F(MockLidar, HeadingRotatesAbsoluteBeamDirection) {
     EXPECT_NEAR(dist, 50.0, kRes);
 }
 
+// Lidar config affects coverage: with the same obstacle, a long-range config detects it while a
+// short-range config (smaller z_max) does not. Demonstrates that swapping lidar configs changes the
+// observed map rather than being ignored.
+TEST_F(MockLidar, RangeConfigChangesObstacleDetectionCoverage) {
+    using namespace drone_mapper;
+    // Obstacle straight ahead (+X) at ~105 cm; the fixture GPS sits at (0,0,50) facing 0deg.
+    map_.set({105.0 * x_extent[cm], 0.0 * y_extent[cm], 50.0 * z_extent[cm]},
+             types::VoxelOccupancy::Occupied);
+
+    drone_mapper::MockLidar long_range(makeCfg(1, 150.0), map_, gps_); // z_max 150 -> reaches it
+    drone_mapper::MockLidar short_range(makeCfg(1, 50.0), map_, gps_);  // z_max 50  -> stops short
+
+    const auto long_scan  = long_range.scan({0.0 * deg, 0.0 * deg});
+    const auto short_scan = short_range.scan({0.0 * deg, 0.0 * deg});
+
+    ASSERT_EQ(long_scan.size(), 1u);  // 1 FOV circle -> a single centre beam
+    ASSERT_EQ(short_scan.size(), 1u);
+    const double miss = std::numeric_limits<double>::max();
+    EXPECT_LT(long_scan[0].distance.numerical_value_in(cm), miss / 2.0)
+        << "long-range lidar should detect the obstacle";
+    EXPECT_DOUBLE_EQ(short_scan[0].distance.numerical_value_in(cm), miss)
+        << "short-range lidar should miss the out-of-range obstacle";
+}
+
 // config() (added 20.6) returns the LidarConfigData the lidar was constructed with, field for field.
 TEST_F(MockLidar, ConfigReturnsInjectedConfig) {
     const drone_mapper::types::LidarConfigData cfg = makeCfg(4, 200.0);
