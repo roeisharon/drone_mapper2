@@ -366,3 +366,40 @@ TEST(SimulationRunFactory, PositiveOffsetFullMissionCoversWholeMap) {
     EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 30.0); // full 50cm span = 5 voxels
     EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), 20.0);
 }
+
+// SimulationRunFactoryImpl::snapToCellCenter — Checkpoint A start alignment.
+
+// A sub-cell start is snapped to the centre of its cell (res 10, offset 0): 13→15, 7→5, 22→25.
+TEST(SimulationRunFactory, SnapToCellCenterAlignsToGridCentre) {
+    const MapConfig cfg = hidden0to50(); // res 10, offset 0
+    const Position3D snapped = drone_mapper::SimulationRunFactoryImpl::snapToCellCenter(
+        Position3D{13.0 * x_extent[cm], 7.0 * y_extent[cm], 22.0 * z_extent[cm]}, cfg);
+    EXPECT_DOUBLE_EQ(snapped.x.numerical_value_in(cm), 15.0);
+    EXPECT_DOUBLE_EQ(snapped.y.numerical_value_in(cm),  5.0);
+    EXPECT_DOUBLE_EQ(snapped.z.numerical_value_in(cm), 25.0);
+}
+
+// The offset participates: with offset +20 (res 10), world 3 → cell floor(23/10)=2 → centre 5.
+TEST(SimulationRunFactory, SnapToCellCenterAccountsForOffset) {
+    const MapConfig cfg{
+        MappingBounds{-20.0 * x_extent[cm], 30.0 * x_extent[cm],
+                      -20.0 * y_extent[cm], 30.0 * y_extent[cm],
+                      -20.0 * z_extent[cm], 30.0 * z_extent[cm]},
+        Position3D{20.0 * x_extent[cm], 20.0 * y_extent[cm], 20.0 * z_extent[cm]},
+        10.0 * cm};
+    const Position3D snapped = drone_mapper::SimulationRunFactoryImpl::snapToCellCenter(
+        Position3D{3.0 * x_extent[cm], 3.0 * y_extent[cm], 3.0 * z_extent[cm]}, cfg);
+    EXPECT_DOUBLE_EQ(snapped.x.numerical_value_in(cm), 5.0);
+    EXPECT_DOUBLE_EQ(snapped.y.numerical_value_in(cm), 5.0);
+    EXPECT_DOUBLE_EQ(snapped.z.numerical_value_in(cm), 5.0);
+}
+
+// A position already at a cell centre is unchanged (idempotent), so re-snapping never drifts.
+TEST(SimulationRunFactory, SnapToCellCenterIdempotentAtCentre) {
+    const MapConfig cfg = hidden0to50();
+    const Position3D centre{15.0 * x_extent[cm], 25.0 * y_extent[cm], 5.0 * z_extent[cm]};
+    const Position3D snapped = drone_mapper::SimulationRunFactoryImpl::snapToCellCenter(centre, cfg);
+    EXPECT_DOUBLE_EQ(snapped.x.numerical_value_in(cm), 15.0);
+    EXPECT_DOUBLE_EQ(snapped.y.numerical_value_in(cm), 25.0);
+    EXPECT_DOUBLE_EQ(snapped.z.numerical_value_in(cm),  5.0);
+}

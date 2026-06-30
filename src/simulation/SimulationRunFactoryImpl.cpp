@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <filesystem>
 #include <memory>
 #include <stdexcept>
@@ -70,6 +71,27 @@ types::MapConfig SimulationRunFactoryImpl::outputMapConfig(const types::MapConfi
     return cfg;
 }
 
+Position3D SimulationRunFactoryImpl::snapToCellCenter(const Position3D& position,
+                                                     const types::MapConfig& config) {
+    const double res = config.resolution.numerical_value_in(cm);
+    if (res <= 0.0) {
+        return position; // degenerate config: nothing to snap to
+    }
+    const double ox = config.offset.x.numerical_value_in(cm);
+    const double oy = config.offset.y.numerical_value_in(cm);
+    const double oz = config.offset.z.numerical_value_in(cm);
+    // Cell index = floor((world + offset) / res); the cell centre is (index + 0.5) * res - offset.
+    const auto centre = [res](double world, double off) {
+        const double index = std::floor((world + off) / res);
+        return (index + 0.5) * res - off;
+    };
+    return Position3D{
+        centre(position.x.numerical_value_in(cm), ox) * x_extent[cm],
+        centre(position.y.numerical_value_in(cm), oy) * y_extent[cm],
+        centre(position.z.numerical_value_in(cm), oz) * z_extent[cm],
+    };
+}
+
 std::unique_ptr<ISimulationRun>
 SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
                                  const types::MissionConfigData& mission,
@@ -96,10 +118,12 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
     auto output_map = std::make_unique<Map3DImpl>(
         std::make_shared<NpyArray>(), output_map_config);
 
-    // GPS starts at the configured position and horizontal angle; altitude is 0 (drone level). The
-    // 3-arg ctor stores the GPS resolution from the mission config.
+    // GPS starts at the configured position SNAPPED to its output-grid cell centre, so the drone
+    // begins exactly on the planner grid (Checkpoint A); altitude is 0 (drone level). The 3-arg ctor
+    // stores the GPS resolution from the mission config. (Start-position validity is still checked in
+    // SimulationRunImpl::run() against the configured position, which is the same cell.)
     auto gps = std::make_unique<MockGPS>(
-        simulation.initial_drone_position,
+        snapToCellCenter(simulation.initial_drone_position, output_map_config),
         Orientation{simulation.initial_angle, 0.0 * altitude_angle[deg]},
         mission.gps_resolution);
     // MockMovement validates moves against the hidden ground-truth map using the drone's radius, so

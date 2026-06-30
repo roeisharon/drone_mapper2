@@ -1,0 +1,42 @@
+score_report:
+  composition_file: configs/simulation_compositions.yaml
+  generated_at_utc: 2026-06-30T13:59:58Z
+  metric: output_map_accuracy
+  score_range:
+    min: 0
+    max: 100
+  error_score: -1
+  summary:
+    total_runs: 4
+    scored_runs: 4
+    error_runs: 0
+    average_score: 94.89034938364094
+    min_score: 87.25056187427637
+    max_score: 99.55050057890077
+  simulations:
+    - simulation_config: configs/sim_configs/benchmark.yaml
+      missions:
+        - mission_config: configs/mission_configs/benchmark_explore.yaml
+          resolution_cm: 1
+          resolution_request_status: Accepted
+          runs:
+            - drone_config: configs/drone_configs/drone_small.yaml
+              lidar_config: configs/lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 5919
+              score: 98.6923653204386
+            - drone_config: configs/drone_configs/drone_small.yaml
+              lidar_config: configs/lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 2358
+              score: 99.55050057890077
+            - drone_config: configs/drone_configs/drone_large.yaml
+              lidar_config: configs/lidar_configs/lidar_a.yaml
+              status: completed
+              steps: 2518
+              score: 87.25056187427637
+            - drone_config: configs/drone_configs/drone_large.yaml
+              lidar_config: configs/lidar_configs/lidar_b.yaml
+              status: completed
+              steps: 1201
+              score: 94.06796976094803

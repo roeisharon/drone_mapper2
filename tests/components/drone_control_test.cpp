@@ -409,7 +409,7 @@ TEST_F(DroneControl, ElevateClampedWhenAboveMax) {
 TEST_F(DroneControl, ElevateNegativeSignPreserved) {
     using namespace ::testing;
     ON_CALL(*algo_, nextStep(_, _)).WillByDefault(Return(elevateStepCmd(-15.0)));
-    EXPECT_CALL(movement_, elevate(CmEq(-15.0))).Times(1);
+    EXPECT_CALL(movement_, elevate(CmEq(-20.0))).Times(1);
     (void)drone_->step();
 }
 
@@ -417,6 +417,30 @@ TEST_F(DroneControl, ElevateNegativeClampedSignPreserved) {
     using namespace ::testing;
     ON_CALL(*algo_, nextStep(_, _)).WillByDefault(Return(elevateStepCmd(-80.0)));
     EXPECT_CALL(movement_, elevate(CmEq(-40.0))).Times(1);
+    (void)drone_->step();
+}
+
+// Checkpoint A — translations are clamped to WHOLE cells so they land on cell centres even when the
+// per-command limit is not a multiple of the resolution. With max_advance 25cm and res 10cm, the
+// largest whole-cell move is 2 cells = 20cm (the old continuous clamp would have allowed sub-cell 25).
+TEST_F(DroneControl, AdvanceClampedToWholeCellsWhenMaxNotResolutionMultiple) {
+    using namespace ::testing;
+    drone_ = std::make_unique<drone_mapper::DroneControlImpl>(
+        makeConfig(45.0, 25.0), drone_mapper::types::MissionConfigData{},
+        lidar_, gps_, movement_, output_map_, *algo_);
+    ON_CALL(*algo_, nextStep(_, _)).WillByDefault(Return(advanceStepCmd(200.0)));
+    EXPECT_CALL(movement_, advance(CmEq(20.0))).Times(1);
+    (void)drone_->step();
+}
+
+// Same for elevate: max_elevate 25cm, res 10cm → 2 whole cells = 20cm.
+TEST_F(DroneControl, ElevateClampedToWholeCellsWhenMaxNotResolutionMultiple) {
+    using namespace ::testing;
+    drone_ = std::make_unique<drone_mapper::DroneControlImpl>(
+        makeConfig(45.0, 50.0, 25.0), drone_mapper::types::MissionConfigData{},
+        lidar_, gps_, movement_, output_map_, *algo_);
+    ON_CALL(*algo_, nextStep(_, _)).WillByDefault(Return(elevateStepCmd(200.0)));
+    EXPECT_CALL(movement_, elevate(CmEq(20.0))).Times(1);
     (void)drone_->step();
 }
 

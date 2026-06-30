@@ -20,6 +20,13 @@ public:
     [[nodiscard]] static types::MapConfig
     outputMapConfig(const types::MapConfig& hidden_config,
                     const types::MappingBounds& mission_bounds);
+
+    // Snaps a world position to the centre of the grid cell that contains it, under the given map
+    // config (resolution + offset). The drone starts here so its position coincides with a planner
+    // grid-cell centre — the first move then lands cleanly on the grid instead of drifting from a
+    // sub-cell origin (Checkpoint A). Pure + static for testing.
+    [[nodiscard]] static Position3D
+    snapToCellCenter(const Position3D& position, const types::MapConfig& config);
 };
 
 } // namespace drone_mapper

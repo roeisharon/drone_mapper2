@@ -9,6 +9,25 @@
 
 namespace drone_mapper {
 
+namespace {
+
+// Clamps a requested move to a WHOLE number of grid cells that fits within the per-command limit, so
+// a move starting at a cell centre lands exactly on another cell centre (planner/execution geometry
+// agree). Returns the distance in cm: min(requested_cells, floor(max/res)) * res. With res <= 0 it
+// degrades to the plain continuous clamp. For limits that are integer multiples of the resolution
+// (the common case) this equals the previous min(requested, max) clamp.
+double cellAlignedDistanceCm(double requested_cm, double max_cm, double res_cm) {
+    if (res_cm <= 0.0) {
+        return std::min(requested_cm, max_cm);
+    }
+    const long long req_cells = std::llround(requested_cm / res_cm);
+    const long long max_cells = static_cast<long long>(std::floor(max_cm / res_cm));
+    const long long cells = std::min(req_cells, std::max<long long>(0, max_cells));
+    return static_cast<double>(cells) * res_cm;
+}
+
+} // namespace
+
 DroneControlImpl::DroneControlImpl(types::DroneConfigData drone,
                                    types::MissionConfigData mission,
                                    ILidar& lidar,
@@ -54,7 +73,11 @@ types::DroneStepResult DroneControlImpl::step() {
             return {types::DroneStepStatus::Completed, {}};
         }
 
-        // 5. Execute the requested movement, clamped to the drone's per-command limits.
+        // 5. Execute the requested movement. Translation commands are clamped to a WHOLE number of
+        //    grid cells within the per-command limit so the drone lands exactly on a cell centre
+        //    (Checkpoint A — planner and execution validate the same footprint). Rotation is an angle,
+        //    so it keeps the plain continuous clamp.
+        const double res_cm = output_map_.getMapConfig().resolution.numerical_value_in(cm);
         types::MovementResult move_result{true, {}};
         if (cmd.movement.has_value()) {
             const auto& mv = *cmd.movement;
@@ -68,18 +91,19 @@ types::DroneStepResult DroneControlImpl::step() {
                 break;
             }
             case types::MovementCommandType::Advance: {
-                const PhysicalLength clamped =
-                    (mv.distance < drone_.max_advance) ? mv.distance : drone_.max_advance;
-                move_result = movement_.advance(clamped);
+                const double dist_cm = cellAlignedDistanceCm(
+                    mv.distance.numerical_value_in(cm),
+                    drone_.max_advance.numerical_value_in(cm), res_cm);
+                move_result = movement_.advance(dist_cm * cm);
                 break;
             }
             case types::MovementCommandType::Elevate: {
-                // Elevate can be negative (descend); clamp magnitude, keep the sign.
-                const double dist_cm    = mv.distance.numerical_value_in(cm);
-                const double max_cm     = drone_.max_elevate.numerical_value_in(cm);
-                const double sign       = (dist_cm >= 0.0) ? 1.0 : -1.0;
-                const double clamped_cm = std::min(std::abs(dist_cm), max_cm) * sign;
-                move_result = movement_.elevate(clamped_cm * cm);
+                // Elevate can be negative (descend); clamp the magnitude to whole cells, keep the sign.
+                const double dist_cm = mv.distance.numerical_value_in(cm);
+                const double sign    = (dist_cm >= 0.0) ? 1.0 : -1.0;
+                const double mag_cm  = cellAlignedDistanceCm(
+                    std::abs(dist_cm), drone_.max_elevate.numerical_value_in(cm), res_cm);
+                move_result = movement_.elevate(sign * mag_cm * cm);
                 break;
             }
             } // switch
