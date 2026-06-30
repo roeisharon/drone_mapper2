@@ -1,0 +1,13 @@
+# error_case_configs/sim_good.yaml
+# A healthy simulation over a tiny real fixture map (5x5x5 @ 10cm, offset 0 → world [0,50)).
+# Start (0,0,0) is in bounds, not occupied (the single Occupied voxel is at world [40,50)).
+# Used to show that a valid scenario still runs and is scored while other scenarios fail.
+
+simulation_config:
+  map_filename: ../../data_maps/single_voxel_x4_y4_z4.npy
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 0
+    y_cm: 0
+    height_cm: 0
+  initial_angle_deg: 0

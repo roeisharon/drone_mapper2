@@ -2,14 +2,57 @@
 
 #include <drone_mapper/utils/ErrorLogger.h>
 #include <drone_mapper/utils/MapsComparison.h>
+#include <drone_mapper/Units.h>
 
 #include <exception>
 #include <filesystem>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace drone_mapper {
+
+namespace {
+
+// True when the mission supplied real bounds (not the all-zero default = no restriction).
+bool missionBoundsSpecified(const types::MappingBounds& b) {
+    const auto zx = 0.0 * x_extent[cm];
+    const auto zy = 0.0 * y_extent[cm];
+    const auto zh = 0.0 * z_extent[cm];
+    return !(b.min_x == zx && b.max_x == zx &&
+             b.min_y == zy && b.max_y == zy &&
+             b.min_height == zh && b.max_height == zh);
+}
+
+// World position inside the half-open box [min, max) on every axis.
+bool withinBounds(const Position3D& p, const types::MappingBounds& b) {
+    return p.x >= b.min_x && p.x < b.max_x &&
+           p.y >= b.min_y && p.y < b.max_y &&
+           p.z >= b.min_height && p.z < b.max_height;
+}
+
+// Validates the drone's start position; returns an error code (or nullopt when valid). Order matters:
+// the map check gates the others (atVoxel is only meaningful in-bounds), and the mission-bounds check
+// precedes the obstacle check so a start far outside the region reports the region error, not an
+// incidental obstacle hit.
+std::optional<std::string> startPositionError(const IMap3D& hidden_map,
+                                              const types::MappingBounds& mission_bounds,
+                                              const Position3D& start) {
+    if (!hidden_map.isInBounds(start)) {
+        return "START_OUTSIDE_MAP";
+    }
+    if (missionBoundsSpecified(mission_bounds) && !withinBounds(start, mission_bounds)) {
+        return "START_OUTSIDE_MISSION_BOUNDS";
+    }
+    if (hidden_map.atVoxel(start) == types::VoxelOccupancy::Occupied) {
+        return "START_IN_OBSTACLE";
+    }
+    return std::nullopt;
+}
+
+} // namespace
 
 SimulationRunImpl::SimulationRunImpl(std::unique_ptr<const IMap3D> hidden_map,
                                      std::unique_ptr<IMutableMap3D> output_map,
@@ -58,6 +101,25 @@ types::SimulationResult SimulationRunImpl::run() {
     const std::filesystem::path error_log_path =
         output_map_file_.parent_path() / (output_map_file_.stem().string() + ".log");
     ErrorLogger logger{error_log_path};
+
+    // Validate the start position before running anything: a start outside the map, outside the
+    // mission bounds, or inside a solid voxel makes the scenario unrunnable → score -1 with a clear
+    // code. This fails only THIS scenario; the manager continues with the rest.
+    if (const auto start_error =
+            startPositionError(*hidden_map_, mission_config_.mission_bounds,
+                               simulation_config_.initial_drone_position)) {
+        try { logger.log(*start_error, "invalid start position"); } catch (...) {}
+        return types::SimulationResult{
+            simulation_config_,
+            mission_config_,
+            types::ResolutionRequestStatus::Ignored,
+            {types::MissionRunResult{
+                types::MissionRunStatus::Error, 0, {{*start_error, "invalid start position"}}}},
+            output_map_file_,
+            output_map_->getMapConfig(),
+            -1.0
+        };
+    }
 
     try {
         types::MissionRunResult mission_result;

@@ -197,6 +197,57 @@ TEST_F(SimulationRun, ResolutionAcceptedWhenFractional) {
     EXPECT_EQ(result.resolution_request_status, ResolutionRequestStatus::Accepted);
 }
 
+// Start-position validation (Stage 2): an unrunnable start fails THIS scenario with -1 + a code.
+
+// Start outside the map → -1 with START_OUTSIDE_MAP (hidden map reports the start out of bounds).
+TEST_F(SimulationRun, StartOutsideMapScoresNegativeOne) {
+    auto run = makeRun();
+    ON_CALL(*mock_hidden_, isInBounds(_)).WillByDefault(Return(false));
+    const auto result = run->run();
+    EXPECT_DOUBLE_EQ(result.mission_score, -1.0);
+    ASSERT_FALSE(result.mission_results.empty());
+    ASSERT_FALSE(result.mission_results[0].errors.empty());
+    EXPECT_EQ(result.mission_results[0].errors[0].code, "START_OUTSIDE_MAP");
+}
+
+// Start inside an occupied voxel → -1 with START_IN_OBSTACLE.
+TEST_F(SimulationRun, StartInObstacleScoresNegativeOne) {
+    auto run = makeRun();
+    ON_CALL(*mock_hidden_, atVoxel(_)).WillByDefault(Return(VoxelOccupancy::Occupied));
+    const auto result = run->run();
+    EXPECT_DOUBLE_EQ(result.mission_score, -1.0);
+    ASSERT_FALSE(result.mission_results.empty());
+    ASSERT_FALSE(result.mission_results[0].errors.empty());
+    EXPECT_EQ(result.mission_results[0].errors[0].code, "START_IN_OBSTACLE");
+}
+
+// Start outside the mission bounds → -1 with START_OUTSIDE_MISSION_BOUNDS (start defaults to (0,0,0);
+// a [10,20) box excludes it).
+TEST_F(SimulationRun, StartOutsideMissionBoundsScoresNegativeOne) {
+    using drone_mapper::types::MappingBounds;
+    using drone_mapper::x_extent;
+    using drone_mapper::y_extent;
+    using drone_mapper::z_extent;
+    mission_cfg_.mission_bounds = MappingBounds{
+        10.0 * x_extent[cm], 20.0 * x_extent[cm],
+        10.0 * y_extent[cm], 20.0 * y_extent[cm],
+        10.0 * z_extent[cm], 20.0 * z_extent[cm]};
+    auto run = makeRun(sim_cfg_, mission_cfg_);
+    const auto result = run->run();
+    EXPECT_DOUBLE_EQ(result.mission_score, -1.0);
+    ASSERT_FALSE(result.mission_results.empty());
+    ASSERT_FALSE(result.mission_results[0].errors.empty());
+    EXPECT_EQ(result.mission_results[0].errors[0].code, "START_OUTSIDE_MISSION_BOUNDS");
+}
+
+// A valid start (in-bounds, not occupied, within mission bounds) passes validation and is scored,
+// never producing a start error.
+TEST_F(SimulationRun, ValidStartProceedsToScoring) {
+    auto run = makeRun();
+    const auto result = run->run();
+    EXPECT_GE(result.mission_score, 0.0); // scored, not the -1 start sentinel
+}
+
 // SimulationRunFactoryImpl::outputMapConfig — mission bounds narrow the output map (Stage 1)
 
 namespace {

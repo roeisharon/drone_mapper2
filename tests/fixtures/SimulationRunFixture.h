@@ -120,6 +120,9 @@ protected:
         mock_hidden_ = hidden.get();
         ON_CALL(*mock_hidden_, getMapConfig()).WillByDefault(Return(singleVoxelConfig()));
         ON_CALL(*mock_hidden_, atVoxel(_)).WillByDefault(Return(VoxelOccupancy::Unmapped));
+        // Default: the configured start is a valid (in-bounds, non-occupied) cell, so start-position
+        // validation passes. Start-failure tests override isInBounds/atVoxel after makeRun().
+        ON_CALL(*mock_hidden_, isInBounds(_)).WillByDefault(Return(true));
 
         auto output = std::make_unique<NiceMock<MockIMutableMap3D>>();
         mock_output_ = output.get();

@@ -11,7 +11,7 @@
 # map_filename is resolved relative to this file's directory.
 
 simulation_config:
-  map_filename: ../../data_maps/single_voxel_x4_y4_z4.npy
+  map_filename: ../../data_maps/single_voxel_x4_y4_.npy
   map_resolution_cm: 1
   initial_drone_position:
     x_cm: 1

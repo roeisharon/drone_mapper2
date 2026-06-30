@@ -1,0 +1,13 @@
+# error_case_configs/sim_start_in_obstacle.yaml
+# Start position inside a solid voxel. single_voxel_x4_y4_z4.npy has its one Occupied voxel at array
+# index (4,4,4); at 10cm/voxel, offset 0, that is world [40,50) — so (45,45,45) is inside it.
+# Expected: scored -1 with code START_IN_OBSTACLE.
+
+simulation_config:
+  map_filename: ../../data_maps/single_voxel_x4_y4_z4.npy
+  map_resolution_cm: 10
+  initial_drone_position:
+    x_cm: 45
+    y_cm: 45
+    height_cm: 45
+  initial_angle_deg: 0
