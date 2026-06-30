@@ -11,15 +11,15 @@
 # map_filename is resolved relative to this file's directory.
 
 simulation_config:
-  map_filename: ../../data_maps/five_voxels_y4_pattern.npy
-  map_resolution_cm: 10
+  map_filename: ../../data_maps/single_voxel_x4_y4_z4.npy
+  map_resolution_cm: 1
   initial_drone_position:
-    x_cm: 2
-    y_cm: 2
-    height_cm: 0
+    x_cm: 1
+    y_cm: 1
+    height_cm: 1
   initial_angle_deg: 0
 
 map_axes_offset:
-  x_offset: 20
-  y_offset: 20
-  height_offset: 20
+  x_offset: 2
+  y_offset: 2
+  height_offset: 2

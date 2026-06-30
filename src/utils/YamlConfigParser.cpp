@@ -166,11 +166,21 @@ types::SimulationConfigData parseSimulationConfig(const std::filesystem::path& p
     cfg.map_resolution = reqField<double>(doc, "map_resolution_cm", 0.0, ctx, logger) * cm;
 
     // map_axes_offset is optional. The spec places it at the document root, beside (not inside)
-    // simulation_config; accept it in either location. Sub-keys default to 0 independently.
-    const YAML::Node offset_node =
-        (file["map_axes_offset"] && file["map_axes_offset"].IsMap()) ? file["map_axes_offset"]
-        : (doc["map_axes_offset"] && doc["map_axes_offset"].IsMap())  ? doc["map_axes_offset"]
-                                                                      : YAML::Node{};
+    // simulation_config; accept it in either location. The benchmark-style configs spell the key
+    // `map_axes_offset_cm`, the spec spells it `map_axes_offset` — accept both, or a non-zero offset
+    // would be silently dropped (and the map treated as if it started at world 0).
+    const auto findOffset = [](const YAML::Node& n) -> YAML::Node {
+        for (const char* key : {"map_axes_offset", "map_axes_offset_cm"}) {
+            if (n[key] && n[key].IsMap()) {
+                return n[key];
+            }
+        }
+        return YAML::Node{};
+    };
+    YAML::Node offset_node = findOffset(file);
+    if (!(offset_node && offset_node.IsMap())) {
+        offset_node = findOffset(doc);
+    }
     if (offset_node && offset_node.IsMap()) {
         cfg.map_offset.x = optField<double>(offset_node, "x_offset",      0.0) * x_extent[cm];
         cfg.map_offset.y = optField<double>(offset_node, "y_offset",      0.0) * y_extent[cm];

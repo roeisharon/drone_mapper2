@@ -4,16 +4,16 @@
 # boundaries cover the map's full world extent (report + validation metadata; Option A).
 
 mission_config:
-  max_steps: 12000
+  max_steps: 30000
   boundaries:
     x_boundary:
-      min_cm: 0
-      max_cm: 29
+      min_cm: -10
+      max_cm: 19
     y_boundary:
-      min_cm: 0
-      max_cm: 30
+      min_cm: -10
+      max_cm: 20
     height_boundary:
-      min_cm: 0
-      max_cm: 31
+      min_cm: -10
+      max_cm: 21
   gps_resolution_cm: 1
   output_mapping_resolution_factor: 1

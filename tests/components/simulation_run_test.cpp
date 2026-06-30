@@ -3,6 +3,9 @@
 
 #include "fixtures/SimulationRunFixture.h"
 
+#include <drone_mapper/simulation/SimulationRunFactoryImpl.h>
+#include <drone_mapper/Units.h>
+
 #include <stdexcept>
 
 // The SimulationRun fixture and its helpers (singleVoxelConfig, completedResult, maxStepsResult,
@@ -192,4 +195,123 @@ TEST_F(SimulationRun, ResolutionAcceptedWhenFractional) {
     auto run = makeRun(sim_cfg_, mission_cfg_);
     const auto result = run->run();
     EXPECT_EQ(result.resolution_request_status, ResolutionRequestStatus::Accepted);
+}
+
+// SimulationRunFactoryImpl::outputMapConfig — mission bounds narrow the output map (Stage 1)
+
+namespace {
+using drone_mapper::x_extent;
+using drone_mapper::y_extent;
+using drone_mapper::z_extent;
+using drone_mapper::Position3D;
+using drone_mapper::types::MapConfig;
+using drone_mapper::types::MappingBounds;
+
+// A hidden-map config spanning [0,50) on each axis at 10 cm/voxel, no offset.
+MapConfig hidden0to50() {
+    return MapConfig{
+        MappingBounds{0.0 * x_extent[cm], 50.0 * x_extent[cm],
+                      0.0 * y_extent[cm], 50.0 * y_extent[cm],
+                      0.0 * z_extent[cm], 50.0 * z_extent[cm]},
+        Position3D{},
+        10.0 * cm};
+}
+} // namespace
+
+// No mission bounds (all-zero default) → output map is byte-identical to the hidden extent.
+TEST(SimulationRunFactory, OutputMapMatchesHiddenWhenNoMissionBounds) {
+    const MapConfig hidden = hidden0to50();
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, MappingBounds{});
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), 0.0);
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 50.0);
+    EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), 0.0);
+    EXPECT_DOUBLE_EQ(out.resolution.numerical_value_in(cm), 10.0);
+}
+
+// Offset alone (non-zero offset, no mission bounds): the offset only relocates the origin — size and
+// world extent are unchanged. A 5x5x5 @ 10cm map at offset +20 spans [-20,30) and stays full size.
+TEST(SimulationRunFactory, OffsetAlonePreservesFullSize) {
+    const MapConfig hidden{
+        MappingBounds{-20.0 * x_extent[cm], 30.0 * x_extent[cm],
+                      -20.0 * y_extent[cm], 30.0 * y_extent[cm],
+                      -20.0 * z_extent[cm], 30.0 * z_extent[cm]},
+        Position3D{20.0 * x_extent[cm], 20.0 * y_extent[cm], 20.0 * z_extent[cm]},
+        10.0 * cm};
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, MappingBounds{});
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), -20.0);
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 30.0); // span 50cm = 5 voxels, unchanged
+    EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), 20.0);         // origin shift preserved
+}
+
+// Mission bounds equal to the full map → unchanged extent, offset stays 0 (benchmark invariant).
+TEST(SimulationRunFactory, FullMissionBoundsEqualHiddenExtent) {
+    const MapConfig hidden = hidden0to50();
+    const MappingBounds full{0.0 * x_extent[cm], 50.0 * x_extent[cm],
+                             0.0 * y_extent[cm], 50.0 * y_extent[cm],
+                             0.0 * z_extent[cm], 50.0 * z_extent[cm]};
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, full);
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), 0.0);
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 50.0);
+    EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), 0.0);
+}
+
+// Sub-map mission bounds → output map narrows to the bounds, offset shifts so index 0 = lower corner.
+TEST(SimulationRunFactory, SubMissionBoundsNarrowOutputMap) {
+    const MapConfig hidden = hidden0to50();
+    const MappingBounds sub{10.0 * x_extent[cm], 40.0 * x_extent[cm],
+                            10.0 * y_extent[cm], 40.0 * y_extent[cm],
+                            10.0 * z_extent[cm], 40.0 * z_extent[cm]};
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, sub);
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), 10.0);
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 40.0);
+    EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), -10.0); // index 0 sits at world 10
+    EXPECT_DOUBLE_EQ(out.boundaries.max_height.numerical_value_in(cm), 40.0);
+}
+
+// Mission bounds wider than the map are clipped to the map (intersection, never an expansion).
+TEST(SimulationRunFactory, MissionBoundsClippedToHiddenExtent) {
+    const MapConfig hidden = hidden0to50();
+    const MappingBounds wide{-100.0 * x_extent[cm], 100.0 * x_extent[cm],
+                             -100.0 * y_extent[cm], 100.0 * y_extent[cm],
+                             -100.0 * z_extent[cm], 100.0 * z_extent[cm]};
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, wide);
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), 0.0);
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 50.0);
+}
+
+// Offset participation: a 5x5x5 @ 10cm map with offset -20 spans world [20,70) (min = -offset).
+// Intersecting with mission [-20,30) gives [20,30) — a single 10cm voxel. Proves the intersection is
+// computed in world coordinates against the offset-derived extent (not assuming the map starts at 0).
+TEST(SimulationRunFactory, NegativeOffsetExtentIntersectedInWorldCoords) {
+    const MapConfig hidden{
+        MappingBounds{20.0 * x_extent[cm], 70.0 * x_extent[cm],
+                      20.0 * y_extent[cm], 70.0 * y_extent[cm],
+                      20.0 * z_extent[cm], 70.0 * z_extent[cm]},
+        Position3D{-20.0 * x_extent[cm], -20.0 * y_extent[cm], -20.0 * z_extent[cm]},
+        10.0 * cm};
+    const MappingBounds mission{-20.0 * x_extent[cm], 30.0 * x_extent[cm],
+                                -20.0 * y_extent[cm], 30.0 * y_extent[cm],
+                                -20.0 * z_extent[cm], 30.0 * z_extent[cm]};
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, mission);
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), 20.0); // max(20,-20)
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 30.0); // min(70,30)
+    EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), -20.0);        // index 0 sits at world 20
+}
+
+// Offset +20 puts the same 5x5x5 map at world [-20,30); mission [-20,30) then covers it fully, so the
+// output is the whole 5x5x5 map (span 50cm). This is the configuration that yields a full-map output.
+TEST(SimulationRunFactory, PositiveOffsetFullMissionCoversWholeMap) {
+    const MapConfig hidden{
+        MappingBounds{-20.0 * x_extent[cm], 30.0 * x_extent[cm],
+                      -20.0 * y_extent[cm], 30.0 * y_extent[cm],
+                      -20.0 * z_extent[cm], 30.0 * z_extent[cm]},
+        Position3D{20.0 * x_extent[cm], 20.0 * y_extent[cm], 20.0 * z_extent[cm]},
+        10.0 * cm};
+    const MappingBounds mission{-20.0 * x_extent[cm], 30.0 * x_extent[cm],
+                                -20.0 * y_extent[cm], 30.0 * y_extent[cm],
+                                -20.0 * z_extent[cm], 30.0 * z_extent[cm]};
+    const MapConfig out = drone_mapper::SimulationRunFactoryImpl::outputMapConfig(hidden, mission);
+    EXPECT_DOUBLE_EQ(out.boundaries.min_x.numerical_value_in(cm), -20.0);
+    EXPECT_DOUBLE_EQ(out.boundaries.max_x.numerical_value_in(cm), 30.0); // full 50cm span = 5 voxels
+    EXPECT_DOUBLE_EQ(out.offset.x.numerical_value_in(cm), 20.0);
 }

@@ -9,6 +9,7 @@
 #include <drone_mapper/mocks/MockMovement.h>
 #include <drone_mapper/simulation/SimulationRunImpl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <filesystem>
 #include <memory>
@@ -30,7 +31,44 @@ std::shared_ptr<NpyArray> loadNpyArray(const std::filesystem::path& path) {
     return map;
 }
 
+// True when the mission supplied real bounds (not the all-zero default produced when the mission YAML
+// has no `boundaries` block). An all-zero MappingBounds means "no restriction — map the whole map".
+bool missionBoundsSpecified(const types::MappingBounds& b) {
+    const auto z_x = 0.0 * x_extent[cm];
+    const auto z_y = 0.0 * y_extent[cm];
+    const auto z_h = 0.0 * z_extent[cm];
+    return !(b.min_x == z_x && b.max_x == z_x &&
+             b.min_y == z_y && b.max_y == z_y &&
+             b.min_height == z_h && b.max_height == z_h);
+}
+
+// Per-axis intersection of two boundary boxes.
+types::MappingBounds intersectBounds(const types::MappingBounds& a, const types::MappingBounds& b) {
+    return types::MappingBounds{
+        std::max(a.min_x, b.min_x),           std::min(a.max_x, b.max_x),
+        std::max(a.min_y, b.min_y),           std::min(a.max_y, b.max_y),
+        std::max(a.min_height, b.min_height), std::min(a.max_height, b.max_height),
+    };
+}
+
 } // namespace
+
+types::MapConfig SimulationRunFactoryImpl::outputMapConfig(const types::MapConfig& hidden_config,
+                                                          const types::MappingBounds& mission_bounds) {
+    // No mission bounds → output map spans the full hidden extent (the prior behaviour, so a mission
+    // whose bounds equal the map — e.g. the benchmark — is byte-for-byte identical).
+    if (!missionBoundsSpecified(mission_bounds)) {
+        return hidden_config;
+    }
+    // Narrow the output map to (hidden ∩ mission). The offset places array index 0 at the lower
+    // corner of the intersection, so atVoxel/set/isInBounds (and therefore the planner and scans)
+    // treat everything outside the bounded region as OutOfBounds.
+    const types::MappingBounds isect = intersectBounds(hidden_config.boundaries, mission_bounds);
+    types::MapConfig cfg = hidden_config;
+    cfg.boundaries = isect;
+    cfg.offset = Position3D{-isect.min_x, -isect.min_y, -isect.min_height};
+    return cfg;
+}
 
 std::unique_ptr<ISimulationRun>
 SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
@@ -49,15 +87,12 @@ SimulationRunFactoryImpl::create(const types::SimulationConfigData& simulation,
         loadNpyArray(simulation.map_filename), hidden_map_config);
 
     // Output map: an empty NpyArray sized from the *constructed* hidden map's resolved config (its
-    // boundaries/offset come from the NPY shape, not the zeroed placeholder above). Using the
-    // placeholder here would yield a 0x0x0 map and make save() throw. Base build keeps the same
-    // resolution as the hidden map (output_mapping_resolution_factor handling is a bonus).
+    // boundaries/offset come from the NPY shape, not the zeroed placeholder above). When the mission
+    // specifies bounds, the output map is narrowed to (hidden ∩ mission) so the drone only maps the
+    // bounded region; otherwise it spans the full hidden extent (benchmark behaviour preserved).
     const types::MapConfig hidden_resolved = hidden_map->getMapConfig();
-    const types::MapConfig output_map_config{
-        hidden_resolved.boundaries,
-        hidden_resolved.offset,
-        hidden_resolved.resolution,
-    };
+    const types::MapConfig output_map_config =
+        outputMapConfig(hidden_resolved, mission.mission_bounds);
     auto output_map = std::make_unique<Map3DImpl>(
         std::make_shared<NpyArray>(), output_map_config);
 

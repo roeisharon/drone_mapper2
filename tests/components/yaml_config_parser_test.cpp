@@ -216,6 +216,19 @@ TEST_F(YamlConfigParser, SimulationConfigNegativeOffset) {
     EXPECT_DOUBLE_EQ(cfg.map_offset.z.numerical_value_in(cm), -10.0);
 }
 
+// The benchmark-style key `map_axes_offset_cm` must be honoured too — otherwise a non-zero offset
+// in those configs is silently dropped and the map is treated as starting at world 0.
+TEST_F(YamlConfigParser, SimulationConfigOffsetCmKeyAccepted) {
+    const auto p = write("sim.yaml",
+                         "map_filename: \"m.npy\"\nmap_resolution_cm: 10\n"
+                         "map_axes_offset_cm:\n  x_offset: -20\n  y_offset: -20\n  height_offset: -20\n");
+    auto logger = makeLogger();
+    const auto cfg = parseSimulationConfig(p, logger);
+    EXPECT_DOUBLE_EQ(cfg.map_offset.x.numerical_value_in(cm), -20.0);
+    EXPECT_DOUBLE_EQ(cfg.map_offset.y.numerical_value_in(cm), -20.0);
+    EXPECT_DOUBLE_EQ(cfg.map_offset.z.numerical_value_in(cm), -20.0);
+}
+
 // An absent offset defaults to (0,0,0).
 TEST_F(YamlConfigParser, SimulationConfigOffsetAbsentDefaultsZero) {
     const auto p = write("sim.yaml", "map_filename: \"m.npy\"\nmap_resolution_cm: 10\n");

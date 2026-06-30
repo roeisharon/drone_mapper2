@@ -29,110 +29,98 @@ bool hasEmptyNeighbor(const IMap3D& origin, const Position3D& pos, double res_cm
     return false;
 }
 
+// World-coordinate intersection of two boundary boxes.
+types::MappingBounds intersect(const types::MappingBounds& a, const types::MappingBounds& b) {
+    return types::MappingBounds{
+        std::max(a.min_x, b.min_x),           std::min(a.max_x, b.max_x),
+        std::max(a.min_y, b.min_y),           std::min(a.max_y, b.max_y),
+        std::max(a.min_height, b.min_height), std::min(a.max_height, b.max_height),
+    };
+}
+
+// Scores one target against origin over a world-coordinate region, at the given resolution.
+// Iterates the region's voxels (cell centres, for unambiguous quantisation) and, for every mappable
+// origin voxel (Empty, or an Occupied surface voxel — interior Occupied voxels are excluded as
+// unobservable), counts the target as matching iff it reports the same value at that world position.
+// Querying by world position means origin and target may differ in shape/offset; only their overlap
+// is scored, so a mission-bounded output map is judged only over the region it was asked to map.
+double scoreTarget(const IMap3D& origin, const IMap3D& target,
+                   const types::MappingBounds& region, double res_cm) {
+    const double min_x = region.min_x.numerical_value_in(cm);
+    const double max_x = region.max_x.numerical_value_in(cm);
+    const double min_y = region.min_y.numerical_value_in(cm);
+    const double max_y = region.max_y.numerical_value_in(cm);
+    const double min_z = region.min_height.numerical_value_in(cm);
+    const double max_z = region.max_height.numerical_value_in(cm);
+
+    const auto n_x = static_cast<std::size_t>(std::max(0.0, std::round((max_x - min_x) / res_cm)));
+    const auto n_y = static_cast<std::size_t>(std::max(0.0, std::round((max_y - min_y) / res_cm)));
+    const auto n_z = static_cast<std::size_t>(std::max(0.0, std::round((max_z - min_z) / res_cm)));
+
+    std::size_t total = 0;
+    std::size_t matching = 0;
+
+    for (std::size_t ix = 0; ix < n_x; ++ix) {
+        const double x_cm = min_x + (static_cast<double>(ix) + 0.5) * res_cm;
+        for (std::size_t iy = 0; iy < n_y; ++iy) {
+            const double y_cm = min_y + (static_cast<double>(iy) + 0.5) * res_cm;
+            for (std::size_t iz = 0; iz < n_z; ++iz) {
+                const double z_cm = min_z + (static_cast<double>(iz) + 0.5) * res_cm;
+                const Position3D pos{x_cm * x_extent[cm], y_cm * y_extent[cm], z_cm * z_extent[cm]};
+
+                const auto origin_val = origin.atVoxel(pos);
+                if (origin_val == types::VoxelOccupancy::Unmapped ||
+                    origin_val == types::VoxelOccupancy::OutOfBounds) {
+                    continue;
+                }
+                if (origin_val == types::VoxelOccupancy::Occupied &&
+                    !hasEmptyNeighbor(origin, pos, res_cm)) {
+                    continue; // unreachable interior solid — unobservable, not counted
+                }
+                ++total;
+                if (target.atVoxel(pos) == origin_val) {
+                    ++matching;
+                }
+            }
+        }
+    }
+    return (total == 0) ? 0.0 : 100.0 * static_cast<double>(matching) / static_cast<double>(total);
+}
+
 } // namespace
 
 // Scores each target map against the authoritative origin (ground-truth) map.
 //
-// Algorithm:
-//   1. Read origin.getMapConfig() for world-coordinate bounds and resolution.
-//   2. Guard: non-positive resolution → return all-zero scores (cannot iterate a grid).
-//   3. Derive integer voxel counts per axis from (max - min) / resolution.
-//   4. For every voxel position in the origin's extent:
-//        a. origin_val = origin.atVoxel(pos).
-//        b. Skip Unmapped / OutOfBounds — not ground truth; excluded from scoring.
-//        c. For Occupied voxels, skip interior voxels that have no Empty neighbor —
-//           a LiDAR beam can never reach them, so they are unobservable and must not
-//           penalise the drone's score.
-//        d. Otherwise count the voxel as mappable; each target matches iff its value at
-//           the same world position equals origin_val exactly.
-//   5. score[t] = 100 * matching[t] / total_mappable   (0 when total_mappable == 0).
+// Each target is scored ONLY over the world region it represents: the intersection of the origin's
+// extent with that target's extent. This matters when a mission-bounded output map covers a
+// sub-region of the hidden map — voxels outside the output region are not the drone's responsibility
+// and must not be counted as misses. When the target covers the whole origin (the common/benchmark
+// case) the region is the origin's full extent, so scoring is unchanged.
 //
-// PotentiallyOccupied policy: scoring is exact-match. The origin map is loaded ground truth
-// and only ever holds Empty/Occupied/Unmapped; PotentiallyOccupied (-3) is produced solely by
-// the output map. A target PotentiallyOccupied therefore only scores when the origin voxel is
-// also PotentiallyOccupied — at an origin Empty/Occupied cell it counts as a miss.
+// Comparison is by WORLD coordinate (not array index), so origin and target may have different
+// shapes/offsets. Per voxel: skip origin Unmapped/OutOfBounds (not ground truth) and interior
+// Occupied voxels with no Empty neighbour (unobservable); otherwise count it mappable and a match
+// iff the target reports the same value at that world position.
 //
-// The target loop is nested inside the voxel triple-loop so each origin voxel is read once
-// regardless of target count: O(n_voxels) origin lookups, O(n_voxels * n_targets) total.
+// PotentiallyOccupied policy: exact-match. The origin is loaded ground truth (Empty/Occupied only);
+// a target PotentiallyOccupied at an origin Empty/Occupied cell is a miss.
 std::vector<double> MapsComparison::compare(const IMap3D& origin,
                                             const std::vector<IMap3D*> targets) {
     if (targets.empty()) {
         return {};
     }
 
-    const types::MapConfig config = origin.getMapConfig();
-    const double res_cm = config.resolution.numerical_value_in(cm);
-
+    const types::MapConfig origin_config = origin.getMapConfig();
+    const double res_cm = origin_config.resolution.numerical_value_in(cm);
     if (res_cm <= 0.0) {
         return std::vector<double>(targets.size(), 0.0);
     }
 
-    const double min_x_cm = config.boundaries.min_x.numerical_value_in(cm);
-    const double max_x_cm = config.boundaries.max_x.numerical_value_in(cm);
-    const double min_y_cm = config.boundaries.min_y.numerical_value_in(cm);
-    const double max_y_cm = config.boundaries.max_y.numerical_value_in(cm);
-    const double min_z_cm = config.boundaries.min_height.numerical_value_in(cm);
-    const double max_z_cm = config.boundaries.max_height.numerical_value_in(cm);
-
-    // std::round absorbs floating-point error in the division; std::max(0.0, ...) guards
-    // against inverted or empty ranges (a degenerate config yields zero voxels, score 0).
-    const auto n_x = static_cast<std::size_t>(
-        std::max(0.0, std::round((max_x_cm - min_x_cm) / res_cm)));
-    const auto n_y = static_cast<std::size_t>(
-        std::max(0.0, std::round((max_y_cm - min_y_cm) / res_cm)));
-    const auto n_z = static_cast<std::size_t>(
-        std::max(0.0, std::round((max_z_cm - min_z_cm) / res_cm)));
-
-    const std::size_t n_targets = targets.size();
-    std::vector<std::size_t> matching(n_targets, 0);
-    std::size_t total_mappable = 0;
-
-    for (std::size_t ix = 0; ix < n_x; ++ix) {
-        const double x_cm = min_x_cm + static_cast<double>(ix) * res_cm;
-
-        for (std::size_t iy = 0; iy < n_y; ++iy) {
-            const double y_cm = min_y_cm + static_cast<double>(iy) * res_cm;
-
-            for (std::size_t iz = 0; iz < n_z; ++iz) {
-                const double z_cm = min_z_cm + static_cast<double>(iz) * res_cm;
-
-                const Position3D pos{
-                    x_cm * x_extent[cm],
-                    y_cm * y_extent[cm],
-                    z_cm * z_extent[cm]
-                };
-
-                const auto origin_val = origin.atVoxel(pos);
-
-                if (origin_val == types::VoxelOccupancy::Unmapped ||
-                    origin_val == types::VoxelOccupancy::OutOfBounds) {
-                    continue;
-                }
-
-                // Interior Occupied voxels (no Empty neighbor) are unreachable by any
-                // LiDAR beam and must not count against the drone's mapping score.
-                if (origin_val == types::VoxelOccupancy::Occupied &&
-                    !hasEmptyNeighbor(origin, pos, res_cm)) {
-                    continue;
-                }
-
-                ++total_mappable;
-
-                for (std::size_t t = 0; t < n_targets; ++t) {
-                    if (targets[t]->atVoxel(pos) == origin_val) {
-                        ++matching[t];
-                    }
-                }
-            }
-        }
-    }
-
-    std::vector<double> scores(n_targets);
-    for (std::size_t t = 0; t < n_targets; ++t) {
-        scores[t] = (total_mappable == 0)
-            ? 0.0
-            : 100.0 * static_cast<double>(matching[t])
-                    / static_cast<double>(total_mappable);
+    std::vector<double> scores(targets.size(), 0.0);
+    for (std::size_t t = 0; t < targets.size(); ++t) {
+        const types::MappingBounds region =
+            intersect(origin_config.boundaries, targets[t]->getMapConfig().boundaries);
+        scores[t] = scoreTarget(origin, *targets[t], region, res_cm);
     }
     return scores;
 }

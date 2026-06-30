@@ -308,3 +308,38 @@ TEST(MapsComparison, InteriorOccupiedVoxelsExcludedFromScoring) {
     ASSERT_EQ(scores.size(), 1u);
     EXPECT_DOUBLE_EQ(scores[0], 100.0);
 }
+
+// Mission-bounded scoring: a target covering only a sub-region of the origin is scored ONLY over that
+// region. Origin [0,3) all Empty; target covers just [0,1) and maps its one cell correctly → 100%
+// (NOT 1/3 = 33%, which is what counting the whole origin would give).
+TEST(MapsComparison, RestrictedTargetScoredOnlyOverItsRegion) {
+    auto origin = makeMap(3, 1, 1);
+    auto target = makeMap(1, 1, 1);          // covers only world [0,1)
+    fillAll(*origin, 3, 1, 1, VoxelOccupancy::Empty);
+    setVoxel(*target, 0, 0, 0, VoxelOccupancy::Empty);
+
+    const auto scores = drone_mapper::MapsComparison::compare(*origin, {target.get()});
+    ASSERT_EQ(scores.size(), 1u);
+    EXPECT_DOUBLE_EQ(scores[0], 100.0);
+}
+
+// Comparison is by world coordinate, not array index: a restricted target with a DIFFERENT offset
+// (array index 0 at world 1) is still matched against the origin at the same world positions.
+TEST(MapsComparison, RestrictedTargetWithDifferentOffsetComparedByWorld) {
+    auto origin = makeMap(3, 1, 1);
+    fillAll(*origin, 3, 1, 1, VoxelOccupancy::Empty);
+
+    // Target covers only world [1,2); its offset -1 puts array index 0 at world 1.
+    const MapConfig tcfg{
+        MappingBounds{1.0 * x_extent[cm], 2.0 * x_extent[cm],
+                      0.0 * y_extent[cm], 1.0 * y_extent[cm],
+                      0.0 * z_extent[cm], 1.0 * z_extent[cm]},
+        Position3D{-1.0 * x_extent[cm], 0.0 * y_extent[cm], 0.0 * z_extent[cm]},
+        1.0 * cm};
+    drone_mapper::Map3DImpl target{std::make_shared<NpyArray>(), tcfg};
+    target.set({1.5 * x_extent[cm], 0.5 * y_extent[cm], 0.5 * z_extent[cm]}, VoxelOccupancy::Empty);
+
+    const auto scores = drone_mapper::MapsComparison::compare(*origin, {&target});
+    ASSERT_EQ(scores.size(), 1u);
+    EXPECT_DOUBLE_EQ(scores[0], 100.0); // region [1,2): origin Empty == target Empty
+}
