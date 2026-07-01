@@ -20,8 +20,9 @@ using drone_mapper::types::MissionRunStatus;
 using drone_mapper::types::MissionConfigData;
 using drone_mapper::types::DroneConfigData;
 
-DroneStepResult continueStep()  { return {DroneStepStatus::Continue,  {}}; }
-DroneStepResult completedStep() { return {DroneStepStatus::Completed, {}}; }
+DroneStepResult continueStep()      { return {DroneStepStatus::Continue,  {}}; }
+DroneStepResult realCollisionStep() { return {DroneStepStatus::Error, "DRONE_COLLISION"}; }
+DroneStepResult completedStep()     { return {DroneStepStatus::Completed, {}}; }
 DroneStepResult errorStep(const std::string& msg = "some_error") {
     return {DroneStepStatus::Error, msg};
 }
@@ -70,6 +71,19 @@ TEST_F(MissionControl, StatusIsCompletedWhenStepReturnsCompleted) {
 // Loop exhausts with only Continue → MaxSteps.
 TEST_F(MissionControl, StatusIsMaxStepsWhenLoopExhaustsWithNoErrors) {
     EXPECT_EQ(makeMission(3)->runMission().status, MissionRunStatus::MaxSteps);
+}
+
+// A real collision (drone actually inside an obstacle → DRONE_COLLISION) is fatal and stops the
+// mission on the FIRST occurrence (Checkpoint C): status Error, exactly one step taken, and the
+// collision recorded — so SimulationRunImpl scores the scenario -1 and does not spin to max_steps.
+TEST_F(MissionControl, RealCollisionStopsMissionImmediatelyWithError) {
+    using namespace ::testing;
+    ON_CALL(drone_control_, step()).WillByDefault(Return(realCollisionStep()));
+    const auto result = makeMission(10)->runMission();
+    EXPECT_EQ(result.status, MissionRunStatus::Error);
+    EXPECT_EQ(result.steps, 1u) << "the mission must stop on the first real collision, not run on";
+    ASSERT_FALSE(result.errors.empty());
+    EXPECT_EQ(result.errors[0].message, "DRONE_COLLISION");
 }
 
 // Errors accumulate and the loop exhausts without Completed → Error.

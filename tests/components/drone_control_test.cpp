@@ -202,18 +202,21 @@ TEST_F(DroneControl, StepContinuesWhenMovementRefusedByCollision) {
     ON_CALL(movement_, advance(_))
         .WillByDefault(Return(drone_mapper::types::MovementResult{false, "DRONE_HITS_OBSTACLE"}));
     const auto result = drone_->step();
+    // Collision PREVENTION: the move was refused before entering the obstacle, so the drone stays put
+    // and exploration continues. Non-fatal, no error message — distinct from an actual collision.
     EXPECT_EQ(result.status, drone_mapper::types::DroneStepStatus::Continue);
+    EXPECT_TRUE(result.message.empty());
 }
 
 // Obstacle detection
 
-// Current cell Occupied → DRONE_HITS_OBSTACLE error.
-TEST_F(DroneControl, StepReturnsObstacleErrorWhenCurrentPositionIsOccupied) {
+// Current cell actually Occupied → a real collision → fatal DRONE_COLLISION error (Checkpoint C).
+TEST_F(DroneControl, StepReturnsCollisionErrorWhenCurrentPositionIsOccupied) {
     using namespace ::testing;
     ON_CALL(output_map_, atVoxel(_)).WillByDefault(Return(drone_mapper::types::VoxelOccupancy::Occupied));
     const auto result = drone_->step();
     EXPECT_EQ(result.status, drone_mapper::types::DroneStepStatus::Error);
-    EXPECT_EQ(result.message, "DRONE_HITS_OBSTACLE");
+    EXPECT_EQ(result.message, "DRONE_COLLISION");
 }
 
 // The obstacle early-return does not advance the step index.

@@ -55,10 +55,13 @@ types::DroneStepResult DroneControlImpl::step() {
         const Position3D  pos     = gps_.position();
         const Orientation heading = gps_.heading();
 
-        // 2. Defensive obstacle check: if the drone's current cell is Occupied it has entered a
-        //    wall (e.g. bad initial placement). Report it without advancing the step index.
+        // 2. Real-collision check: if the drone's current cell is Occupied it is
+        //    actually INSIDE an obstacle — the movement layer's prevention failed or an inconsistency
+        //    occurred. This is a genuine collision, so it is FATAL: report a distinct DRONE_COLLISION
+        //    error that stops the mission and scores the scenario -1. (A move merely REFUSED before
+        //    entering an obstacle is collision PREVENTION, handled in step 7 and stays non-fatal.)
         if (output_map_.atVoxel(pos) == types::VoxelOccupancy::Occupied) {
-            return {types::DroneStepStatus::Error, "DRONE_HITS_OBSTACLE"};
+            return {types::DroneStepStatus::Error, "DRONE_COLLISION"};
         }
 
         // 2b. The drone physically occupies this cell and it is provably not Occupied, so mark it
@@ -126,11 +129,12 @@ types::DroneStepResult DroneControlImpl::step() {
             ScanResultToVoxels::applyToMap(output_map_, scan_pos, scan_heading, new_scan, lidar_.config());
         }
 
-        // 7. Advance the step counter. A collision refusal (DRONE_HITS_OBSTACLE) is a routine part
-        //    of exploration, NOT a mission failure: the optimistic planner probes an unmapped cell
-        //    the movement layer knows is solid/too-narrow, the drone simply stays put, and the next
-        //    scan maps that obstacle so the planner reroutes around it. Any OTHER movement failure
-        //    is a genuine fault and still surfaces as a step error.
+        // 7. Advance the step counter. A move REFUSED by the movement layer (DRONE_HITS_OBSTACLE) is
+        //    collision PREVENTION, not a collision: the optimistic planner probed an unmapped cell the
+        //    movement layer knows is solid/too-narrow, the move was rejected, the drone stayed put, and
+        //    the next scan maps that obstacle so the planner reroutes. This stays non-fatal (Continue)
+        //    — punishing the planner for probing an unknown frontier that prevention handled would be
+        //    wrong. Any OTHER movement failure is an unexpected fault and remains a fatal step Error.
         ++step_index_;
         if (!move_result.success) {
             if (move_result.message == "DRONE_HITS_OBSTACLE") {

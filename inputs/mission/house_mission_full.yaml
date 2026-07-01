@@ -9,6 +9,6 @@ mission_config:
       max_cm: 300
     height_boundary:
       min_cm: 0
-      max_cm: 150
+      max_cm: 310
   gps_resolution_cm: 10         # GPS expected measurement precision
 

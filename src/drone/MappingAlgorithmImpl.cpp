@@ -212,19 +212,19 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
     GridCell immediate_step = path[0];
     GridCell target_cell = immediate_step;
 
-    // Leading-edge scan-before-enter (Checkpoint B) is only ATTEMPTED when the leading edge is
+    // Leading-edge scan-before-enter is only ATTEMPTED when the leading edge is
     // observable: the lidar sees nothing closer than z_min, so if the drone's radius is below z_min the
     // newly-entered footprint cells sit inside that blind zone and can never be confirmed. Gating on
     // them there would stall the drone (every frontier "unconfirmable") — the large-drone regression
     // seen with z_min=20cm > radius=7.5cm. When not observable the drone enters optimistically, exactly
-    // as before Checkpoint B (collisions stay non-fatal and are mapped by the next scan).
+    // as before (collisions stay non-fatal and are mapped by the next scan).
     const double radius_cm = drone_config_.radius.numerical_value_in(cm);
     const double z_min_cm  = lidar_config_.z_min.numerical_value_in(cm);
     const bool confirm_before_enter = radius_cm > 0.0 && radius_cm >= z_min_cm;
 
     // Jump ahead through a straight run of already-verified-Empty cells. When confirmation is active the
     // run is capped to the per-tick move limit (whole cells within max_advance/max_elevate) so
-    // target_cell is the cell the drone ACTUALLY lands on (Checkpoint A clamps the move identically),
+    // target_cell is the cell the drone ACTUALLY lands on (clamps the move identically),
     // making the leading-edge check match exactly what the move enters. Otherwise the original
     // up-to-5-cell jump is kept unchanged (DroneControl still clamps the executed distance).
     if (path.size() > 1) {
@@ -260,7 +260,7 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
     // the current footprint are reused). But confirmation is BEST-EFFORT: after kMaxScanAttempts scans
     // of the same cell it enters optimistically anyway rather than abandoning a reachable frontier —
     // the earlier design blacklisted here and stranded the whole drone. Unobservable leading edges
-    // (radius < z_min) are never gated, so those runs stay identical to pre-Checkpoint-B behaviour.
+    // (radius < z_min) are never gated.
     constexpr int kMaxScanAttempts = 1;
     const bool leading_unconfirmed = confirm_before_enter &&
         !leadingFootprintClear(output_map_, gridToWorld(current), gridToWorld(target_cell),

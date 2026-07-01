@@ -43,7 +43,13 @@ types::MissionRunResult MissionControlImpl::runMission() {
             }
             if (step_result.status == types::DroneStepStatus::Error) {
                 errors.push_back({"DRONE_ERROR", step_result.message});
-                // Do not break — let the loop run on so all failing steps are recorded.
+                // A real collision (drone actually inside an obstacle) is fatal: stop the mission
+                // immediately so it does not spin in place. Any OTHER error is recorded
+                // but does NOT break, so every failing step is documented and the drone keeps its full
+                // step budget to recover (unchanged behaviour).
+                if (step_result.message == "DRONE_COLLISION") {
+                    break;
+                }
             }
             // DroneStepStatus::Continue — proceed to the next step.
         }
