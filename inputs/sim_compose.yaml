@@ -4,6 +4,9 @@ simulation_compositions:
       mission_configs:
         - "mission/house_mission_lower.yaml"
         - "mission/house_mission_full.yaml"
+    - simulation_config: "simulation/house_simulation_full_raw_map.yaml"
+      mission_configs:
+        - "mission/house_mission_full_raw_map.yaml"
     - simulation_config: "simulation/large_simulation_out.yaml"
       mission_configs:
         - "mission/large_mission_out.yaml"

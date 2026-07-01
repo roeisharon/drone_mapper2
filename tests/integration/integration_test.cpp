@@ -5,94 +5,207 @@
 #include <drone_mapper/simulation/SimulationManager.h>
 #include <drone_mapper/simulation/SimulationRunFactoryImpl.h>
 
+#include <algorithm>
+#include <chrono>
 #include <memory>
+#include <string>
 #include <vector>
 
 // Real-algorithm end-to-end integration tests (suite "Integration"). These drive the WHOLE pipeline —
 // YAML parsing → SimulationManager → real SimulationRunFactoryImpl → SimulationRun → MissionControl →
 // DroneControl → Map3D/MockLidar/MockMovement/MockGPS → ScanResultToVoxels → MapsComparison →
-// SimulationReportWriter — over the course-provided inputs/ scenarios (the same maps/configs used to
-// develop and debug the project; scenario_house.npy IS the benchmark map). Assertions are on concrete
-// observable behaviour so an injected bug in almost any component perturbs at least one of them.
+// SimulationReportWriter — over the course-provided inputs/ scenarios. scenario_house.npy is the
+// benchmark-style staff map (formerly benchmark_map) used to validate Checkpoints A/B/C. Assertions
+// are on concrete observable behaviour so an injected bug in almost any component perturbs one of them.
 //
 // The mock-algorithm full-flow test lives in mock_algorithm_integration_test.cpp; both share
 // integration_support.h.
 
-// ================================================================================================
-// 1. Real algorithm, real components — full flow through SimulationManager over course inputs.
-// ================================================================================================
-TEST(Integration, RealAlgorithmFullFlowOverCourseInputs) {
-    ASSERT_TRUE(fs::exists(kInputs / "map" / "scenario_small.npy"))
-        << "run the test binary from the repo root (inputs/ must be reachable)";
+namespace {
 
-    const fs::path out = freshOutputDir("real");
-    ErrorLogger logger{out / "output_results" / "parse.log"};
-    const SmallRoomInputs in = parseSmallRoom(logger);
+// Hand-rolled configs for the tiny 5x5x5 data_maps fixture (there is no inputs/ YAML for it).
+types::SimulationConfigData simpleMapSim() {
+    // single_voxel_x4_y4_z4.npy: 5x5x5, one Occupied voxel at (4,4,4), 124 Empty. Start at the (0,0,0)
+    // cell centre (0.5cm) so the radius-0.5 footprint only touches the map edge, never penetrates it.
+    return types::SimulationConfigData{
+        "data_maps/single_voxel_x4_y4_z4.npy",
+        1.0 * cm,
+        Position3D{},
+        worldCm(0.5, 0.5, 0.5),
+        0.0 * horizontal_angle[deg],
+    };
+}
 
-    // Config parsing populated real values (guards the YAML parser + diameter→radius).
-    ASSERT_GT(in.mission.max_steps, 0u);
-    ASSERT_GT(in.drone_small.radius.numerical_value_in(cm), 0.0);
-    ASSERT_GT(in.drone_large.radius.numerical_value_in(cm),
-              in.drone_small.radius.numerical_value_in(cm));
-    ASSERT_TRUE(fs::exists(in.simulation.map_filename)) << in.simulation.map_filename;
+types::DroneConfigData simpleSmallDrone() {
+    return types::DroneConfigData{0.5 * cm, 45.0 * horizontal_angle[deg], 1.0 * cm, 1.0 * cm};
+}
+
+types::LidarConfigData simpleFastLidar() {
+    // fov_circles=2, short range — cheap to trace on the tiny map.
+    return types::LidarConfigData{0.5 * cm, 2.0 * cm, 0.5 * cm, 2};
+}
+
+types::MissionConfigData simpleMission() {
+    return types::MissionConfigData{2000, 1.0 * cm, 1.0, types::MappingBounds{}};
+}
+
+int countNpyFiles(const fs::path& dir) {
+    int n = 0;
+    if (!fs::exists(dir)) {
+        return 0;
+    }
+    for (const auto& entry : fs::recursive_directory_iterator(dir)) {
+        if (entry.path().extension() == ".npy") {
+            ++n;
+        }
+    }
+    return n;
+}
+
+} // namespace
+
+// ================================================================================================
+// 1. Fast happy path on a trivial 5x5x5 map — the small drone should map essentially everything.
+// ================================================================================================
+TEST(Integration, SimpleMapHappyPathAchievesHighCoverage) {
+    ASSERT_TRUE(fs::exists("data_maps/single_voxel_x4_y4_z4.npy"))
+        << "run the test binary from the repo root";
+
+    const fs::path out = freshOutputDir("simple");
 
     types::SimulationCompositionData comp;
-    comp.composition_file = "integration_real_compose.yaml";
+    comp.composition_file = "integration_simple_compose.yaml";
     comp.simulation_mission_groups.emplace_back(
-        in.simulation, std::vector<types::MissionConfigData>{in.mission});
-    comp.drones = {in.drone_small, in.drone_large};
-    comp.lidars = {in.lidar_short};
+        simpleMapSim(), std::vector<types::MissionConfigData>{simpleMission()});
+    comp.drones = {simpleSmallDrone()};
+    comp.lidars = {simpleFastLidar()};
 
     SimulationManager manager{std::make_unique<SimulationRunFactoryImpl>()};
     const types::SimulationManagerReport report = manager.run(comp, out);
 
-    // Cartesian order is group→mission→drone→lidar, so runs[0]=small×short, runs[1]=large×short.
-    ASSERT_EQ(report.runs.size(), 2u);
-    EXPECT_EQ(report.metric, "output_map_accuracy");
-    EXPECT_DOUBLE_EQ(std::get<0>(report.score_range), 0.0);
-    EXPECT_DOUBLE_EQ(std::get<1>(report.score_range), 100.0);
-    EXPECT_EQ(report.error_score, -1);
-
-    const types::SimulationResult& small_run = report.runs[0];
-    const types::SimulationResult& large_run = report.runs[1];
-
-    // Completes successfully, no error status.
-    ASSERT_FALSE(small_run.mission_results.empty());
-    EXPECT_EQ(small_run.mission_results[0].status, types::MissionRunStatus::Completed);
-    EXPECT_TRUE(small_run.mission_results[0].errors.empty());
-
-    // Output .npy created and non-empty on disk.
-    ASSERT_TRUE(fs::exists(small_run.output_map_file));
-    EXPECT_GT(fs::file_size(small_run.output_map_file), 0u);
-
-    // Output shape equals the mission-bounds region: x[0,200) y[90,200) z[0,90) @ 10cm ⇒ 20×11×9.
-    const MapStats stats = censusOutputMap(small_run.output_map_file, small_run.output_map_config);
-    EXPECT_EQ(stats.nx, 20);
-    EXPECT_EQ(stats.ny, 11);
-    EXPECT_EQ(stats.nz, 9);
-
-    // Meaningful mapped content, not only Unmapped (catches lidar/scan-writer/movement/algo failures).
-    EXPECT_GT(stats.mapped, 100) << "the drone should have observed a large part of the room";
-    EXPECT_GT(stats.empty, 0);
-    EXPECT_GT(stats.occupied, 0) << "walls of the room must be mapped as Occupied";
-
-    // Score is a real value in range and high for a drone that fits the room.
-    EXPECT_GE(small_run.mission_score, 0.0);
-    EXPECT_LE(small_run.mission_score, 100.0);
-    EXPECT_GT(small_run.mission_score, 50.0);
-
-    // Different drone sizes → different coverage: the 15cm drone is wedged at the wall/floor start and
-    // maps almost nothing, so it scores strictly below the small drone.
-    ASSERT_FALSE(large_run.mission_results.empty());
-    EXPECT_EQ(large_run.mission_results[0].status, types::MissionRunStatus::Completed);
-    EXPECT_GT(small_run.mission_score, large_run.mission_score);
-
-    // The manager wrote the report file.
-    EXPECT_TRUE(fs::exists(out / "simulation_output.yaml"));
+    ASSERT_EQ(report.runs.size(), 1u);
+    ASSERT_FALSE(report.runs[0].mission_results.empty());
+    EXPECT_NE(report.runs[0].mission_results[0].status, types::MissionRunStatus::Error);
+    EXPECT_TRUE(fs::exists(report.runs[0].output_map_file));
+    // An unobstructed 5x5x5 room fully explored ⇒ near-100. A generous floor still fails hard on a
+    // gross regression (stuck drone / broken scan / broken scoring ⇒ ~0) without being brittle.
+    EXPECT_GE(report.runs[0].mission_score, 95.0)
+        << "trivial map should map almost perfectly; got " << report.runs[0].mission_score;
+    EXPECT_LE(report.runs[0].mission_score, 100.0);
 }
 
 // ================================================================================================
-// 2. Real NPY load path normalizes Minecraft-style multi-valued blocks to occupancy.
+// 2. PRIMARY: full real-algorithm flow on the staff benchmark map (scenario_house) + runtime sanity.
+// ================================================================================================
+TEST(Integration, RealAlgorithmFullFlowOnHouseBenchmark) {
+    ASSERT_TRUE(fs::exists(kInputs / "map" / "scenario_house.npy"))
+        << "run the test binary from the repo root (inputs/ must be reachable)";
+
+    const fs::path out = freshOutputDir("house");
+    ErrorLogger logger{out / "output_results" / "parse.log"};
+
+    // Use the FULL-RAW-MAP house scenario (offset 0, mission covering the whole array) so the output map
+    // is the ENTIRE scenario_house extent, not just the offset-clipped house region. The large (15cm)
+    // drone starts at voxel (4,4,15) — the drone-start gap on the house floor — and exercises footprint
+    // handling / entrance fitting; it needs fewer steps than the small drone, keeping the run bounded.
+    const auto sim     = config::parseSimulationConfig(kInputs / "simulation" / "house_simulation_full_raw_map.yaml", logger);
+    const auto mission = config::parseMissionConfig(kInputs / "mission" / "house_mission_full_raw_map.yaml", logger);
+    const auto drone   = config::parseDroneConfig(kInputs / "drone" / "drone_large.yaml", logger);
+    const auto lidar   = config::parseLidarConfig(kInputs / "lidar" / "lidar_short.yaml", logger);
+    ASSERT_TRUE(fs::exists(sim.map_filename)) << sim.map_filename;
+
+    types::SimulationCompositionData comp;
+    comp.composition_file = "integration_house_compose.yaml";
+    comp.simulation_mission_groups.emplace_back(
+        sim, std::vector<types::MissionConfigData>{mission});
+    comp.drones = {drone};
+    comp.lidars = {lidar};
+
+    SimulationManager manager{std::make_unique<SimulationRunFactoryImpl>()};
+    const auto t0 = std::chrono::steady_clock::now();
+    const types::SimulationManagerReport report = manager.run(comp, out);
+    const auto elapsed_s = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::steady_clock::now() - t0)
+                               .count();
+
+    // Runtime sanity (idea 4): a bounded house run must not blow up.
+    EXPECT_LT(elapsed_s, 60) << "house run took " << elapsed_s << "s (limit 60)";
+
+    ASSERT_EQ(report.runs.size(), 1u);
+    const types::SimulationResult& run = report.runs[0];
+
+    // No error, actually completed exploration.
+    ASSERT_FALSE(run.mission_results.empty());
+    EXPECT_EQ(run.mission_results[0].status, types::MissionRunStatus::Completed);
+    EXPECT_TRUE(run.mission_results[0].errors.empty());
+
+    // Output map created, non-empty, and the shape is the ENTIRE scenario_house array. With offset 0 the
+    // hidden extent is world x[0,290) y[0,300) z[0,310) and the mission covers all of it ⇒ 29×30×31.
+    // (Array z 0–14 is solid "earth" below the drone-start floor at z-15; it is inside the output extent
+    // but the drone maps the reachable house above it.)
+    ASSERT_TRUE(fs::exists(run.output_map_file));
+    EXPECT_GT(fs::file_size(run.output_map_file), 0u);
+    const MapStats stats = censusOutputMap(run.output_map_file, run.output_map_config);
+    EXPECT_EQ(stats.nx, 29);
+    EXPECT_EQ(stats.ny, 30);
+    EXPECT_EQ(stats.nz, 31);
+
+    // Meaningful mapped content (block normalization + scanning + serialization all worked).
+    EXPECT_GT(stats.mapped, 0);
+    EXPECT_GT(stats.empty, 0);
+    EXPECT_GT(stats.occupied, 0) << "house structure must be mapped as Occupied";
+
+    // A sane, real score. The scored region now spans the whole map (the solid-earth floor is included),
+    // so the exact value differs from the offset-clipped run; a conservative floor still fails hard on a
+    // gross regression (stuck drone / broken scan / broken scoring ⇒ ~0) without being brittle to how
+    // much of the earth floor gets scanned.
+    EXPECT_GT(run.mission_score, 40.0) << "unexpectedly low score: " << run.mission_score;
+    EXPECT_LE(run.mission_score, 100.0);
+}
+
+// ================================================================================================
+// 3. Fast scenario_small run over MULTIPLE drone/lidar combinations: one output map each + drone-size
+//    differentiation (kept small for runtime, per the "keep one fast scenario_small test" request).
+// ================================================================================================
+TEST(Integration, MultiCombinationOutputsAndDroneSizeDifferentiation) {
+    ASSERT_TRUE(fs::exists(kInputs / "map" / "scenario_small.npy"));
+
+    const fs::path out = freshOutputDir("multi");
+    ErrorLogger logger{out / "output_results" / "parse.log"};
+    const SmallRoomInputs in = parseSmallRoom(logger);
+
+    types::SimulationCompositionData comp;
+    comp.composition_file = "integration_multi_compose.yaml";
+    comp.simulation_mission_groups.emplace_back(
+        in.simulation, std::vector<types::MissionConfigData>{in.mission});
+    comp.drones = {in.drone_small, in.drone_large};
+    comp.lidars = {in.lidar_short, in.lidar_long};
+
+    SimulationManager manager{std::make_unique<SimulationRunFactoryImpl>()};
+    const types::SimulationManagerReport report = manager.run(comp, out);
+
+    // 1 group × 1 mission × 2 drones × 2 lidars = 4 runs, order drone-outer then lidar-inner:
+    // [small×short, small×long, large×short, large×long].
+    ASSERT_EQ(report.runs.size(), 4u);
+    for (const types::SimulationResult& r : report.runs) {
+        ASSERT_FALSE(r.mission_results.empty());
+        EXPECT_EQ(r.mission_results[0].status, types::MissionRunStatus::Completed);
+    }
+
+    // Each combination produced exactly one output .npy map.
+    EXPECT_EQ(countNpyFiles(out / "output_results"), 4);
+
+    // Drone-size differentiation: the small drone fits the room and maps it; the 15cm drone is wedged
+    // at the wall/floor start and maps almost nothing, so both small runs beat both large runs.
+    const double small_min = std::min(report.runs[0].mission_score, report.runs[1].mission_score);
+    const double large_max = std::max(report.runs[2].mission_score, report.runs[3].mission_score);
+    EXPECT_GT(small_min, large_max)
+        << "small=[" << report.runs[0].mission_score << "," << report.runs[1].mission_score
+        << "] large=[" << report.runs[2].mission_score << "," << report.runs[3].mission_score << "]";
+}
+
+// ================================================================================================
+// 4. Real NPY load path normalizes Minecraft-style multi-valued blocks to occupancy.
 // ================================================================================================
 TEST(Integration, RealNpyLoadNormalizesMinecraftBlocksToOccupancy) {
     ASSERT_TRUE(fs::exists(kInputs / "map" / "scenario_house.npy"));
@@ -110,23 +223,26 @@ TEST(Integration, RealNpyLoadNormalizesMinecraftBlocksToOccupancy) {
 }
 
 // ================================================================================================
-// 3. Map offset shifts world boundaries: min = -offset, max = shape*res - offset.
+// 5. Load derives world boundaries from the NPY shape (29×30×31) and offset: min=-offset,
+//    max=shape*res-offset.
 // ================================================================================================
-TEST(Integration, MapOffsetShiftsWorldBoundaries) {
+TEST(Integration, MapLoadDerivesWorldBoundariesFromShapeAndOffset) {
     ASSERT_TRUE(fs::exists(kInputs / "map" / "scenario_house.npy"));
     // scenario_house is (29,30,31); apply a height offset of 150cm (the house scenario's own offset).
     const types::MapConfig cfg{types::MappingBounds{}, worldCm(0, 0, 150), 10.0 * cm};
     Map3DImpl map{loadNpy(kInputs / "map" / "scenario_house.npy"), cfg};
     const types::MappingBounds b = map.getMapConfig().boundaries;
 
-    EXPECT_DOUBLE_EQ(b.min_height.numerical_value_in(cm), -150.0);
-    EXPECT_DOUBLE_EQ(b.max_height.numerical_value_in(cm), 31 * 10.0 - 150.0);
     EXPECT_DOUBLE_EQ(b.min_x.numerical_value_in(cm), 0.0);
     EXPECT_DOUBLE_EQ(b.max_x.numerical_value_in(cm), 29 * 10.0);
+    EXPECT_DOUBLE_EQ(b.min_y.numerical_value_in(cm), 0.0);
+    EXPECT_DOUBLE_EQ(b.max_y.numerical_value_in(cm), 30 * 10.0);
+    EXPECT_DOUBLE_EQ(b.min_height.numerical_value_in(cm), -150.0);
+    EXPECT_DOUBLE_EQ(b.max_height.numerical_value_in(cm), 31 * 10.0 - 150.0);
 }
 
 // ================================================================================================
-// 4. Start-position validation fails one scenario with -1 without affecting the flow.
+// 6. Start-position validation fails one scenario with -1 without affecting the flow.
 // ================================================================================================
 TEST(Integration, StartOutsideMapFailsScenarioWithNegativeOne) {
     ASSERT_TRUE(fs::exists(kInputs / "map" / "scenario_small.npy"));
