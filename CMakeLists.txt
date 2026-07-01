@@ -52,20 +52,19 @@ add_executable(maps_comparison src/maps_comparison_main.cpp)
 target_link_libraries(maps_comparison PRIVATE drone_mapper)
 
 add_executable(drone_mapper_simulation_test
-    tests/components/error_logger_test.cpp
+    # Required component suites (per the assignment) + Map3DImpl (kept as a core-infrastructure
+    # exception: it is the map implementation MappingAlgorithm/MockLidar/MapsComparison build on).
     tests/components/map3d_test.cpp
     tests/components/mock_lidar_test.cpp
     tests/components/mock_gps_movement_test.cpp
-    tests/components/scan_result_to_voxels_test.cpp
     tests/components/mapping_algorithm_test.cpp
     tests/components/drone_control_test.cpp
     tests/components/mission_control_test.cpp
     tests/components/simulation_run_test.cpp
-    tests/components/yaml_config_parser_test.cpp
     tests/components/simulation_manager_test.cpp
-    tests/components/simulation_report_writer_test.cpp
     tests/components/maps_comparison_test.cpp
     tests/integration/integration_test.cpp
+    tests/integration/mock_algorithm_integration_test.cpp
 )
 target_compile_features(drone_mapper_simulation_test PUBLIC cxx_std_20)
 target_compile_options(drone_mapper_simulation_test
