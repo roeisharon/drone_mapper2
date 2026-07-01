@@ -60,6 +60,13 @@ private:
     CellQueue frontier_;      // BFS frontier (FIFO)
     std::optional<GridCell> current_target_; // cell currently being navigated toward
 
+    // Scan-before-enter bookkeeping (Checkpoint B): the cell a bodied drone is currently trying to
+    // confirm before entering, and how many consecutive scans it has spent on it. Re-scanning a fixed
+    // orientation reveals nothing new, so after a small cap the algorithm reroutes (blacklists that
+    // step) rather than scanning forever. Unused for point drones (radius 0), which stay optimistic.
+    std::optional<GridCell> pending_scan_cell_;
+    int scan_attempts_ = 0;
+
     // Grid step size (cm) from the output map's resolution.
     [[nodiscard]] double stepCm() const noexcept;
     // World position -> nearest grid cell.

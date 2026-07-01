@@ -65,27 +65,31 @@ Position3D MappingAlgorithmImpl::gridToWorld(const GridCell& cell) const noexcep
 }
 
 bool MappingAlgorithmImpl::isNavigable(const GridCell& cell) const noexcept {
-    // Navigable only if INSIDE the map and not a known obstacle. Unmapped means not yet
-    // scanned — treated as passable (optimistic) so exploration can proceed. OutOfBounds must
-    // NOT be navigable: atVoxel() returns OutOfBounds (not Occupied) past the map edge, so
-    // without this the frontier leaks into the infinite empty space outside the map and the
-    // algorithm never returns Finished. PotentiallyOccupied is an obstacle too: the drone must
-    // not navigate into a too-close, uncertain detection (collision safety).
+    // Navigable only if INSIDE the map and not a CONFIRMED obstacle. Unmapped means not yet scanned
+    // → passable (optimistic) so exploration can proceed. OutOfBounds must NOT be navigable:
+    // atVoxel() returns OutOfBounds (not Occupied) past the map edge, so without this the frontier
+    // leaks into the infinite empty space outside the map and the algorithm never returns Finished.
+    //
+    // PotentiallyOccupied is treated as PASSABLE uncertainty, NOT a hard obstacle: it only means a
+    // beam hit something closer than the lidar's z_min, so the exact voxel is unknown — not that a
+    // wall is confirmed there. Blocking on it stranded large drones near the start, whose big
+    // footprint always overlaps the near-field PotentiallyOccupied shell the first scans paint (this
+    // is why drone_large + long-range lidar terminated after ~3 steps). The real collision guard is
+    // MockMovement, which validates every move against the hidden ground-truth map (and refuses a
+    // genuine wall non-fatally); the next scan then resolves the uncertain voxel to Empty/Occupied.
     const Position3D center = gridToWorld(cell);
     const types::VoxelOccupancy v = output_map_.atVoxel(center);
     if (v == types::VoxelOccupancy::Occupied ||
-        v == types::VoxelOccupancy::PotentiallyOccupied ||
         v == types::VoxelOccupancy::OutOfBounds) {
         return false;
     }
     // The cell itself is free, but the drone is a sphere of drone_config_.radius — it can only
-    // occupy this cell if its full footprint clears every known obstacle. This stops the planner
-    // routing a large drone through gaps a point-sized drone could slip through. With a zero
-    // radius (default config) this reduces to the single-cell test above.
+    // occupy this cell if its full footprint clears every CONFIRMED obstacle. This stops the planner
+    // routing a large drone through gaps a point-sized drone could slip through. With a zero radius
+    // (default config) this reduces to the single-cell test above.
     return footprintFits(output_map_, center, drone_config_.radius,
                          [](types::VoxelOccupancy occ) {
-                             return occ == types::VoxelOccupancy::Occupied ||
-                                    occ == types::VoxelOccupancy::PotentiallyOccupied;
+                             return occ == types::VoxelOccupancy::Occupied;
                          });
 }
 
@@ -208,22 +212,42 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
     GridCell immediate_step = path[0];
     GridCell target_cell = immediate_step;
 
-    // Jump up to 50cm if the hallway ahead is verified empty
+    // Leading-edge scan-before-enter (Checkpoint B) is only ATTEMPTED when the leading edge is
+    // observable: the lidar sees nothing closer than z_min, so if the drone's radius is below z_min the
+    // newly-entered footprint cells sit inside that blind zone and can never be confirmed. Gating on
+    // them there would stall the drone (every frontier "unconfirmable") — the large-drone regression
+    // seen with z_min=20cm > radius=7.5cm. When not observable the drone enters optimistically, exactly
+    // as before Checkpoint B (collisions stay non-fatal and are mapped by the next scan).
+    const double radius_cm = drone_config_.radius.numerical_value_in(cm);
+    const double z_min_cm  = lidar_config_.z_min.numerical_value_in(cm);
+    const bool confirm_before_enter = radius_cm > 0.0 && radius_cm >= z_min_cm;
+
+    // Jump ahead through a straight run of already-verified-Empty cells. When confirmation is active the
+    // run is capped to the per-tick move limit (whole cells within max_advance/max_elevate) so
+    // target_cell is the cell the drone ACTUALLY lands on (Checkpoint A clamps the move identically),
+    // making the leading-edge check match exactly what the move enters. Otherwise the original
+    // up-to-5-cell jump is kept unchanged (DroneControl still clamps the executed distance).
     if (path.size() > 1) {
-        int dx = path[0].x - current.x;
-        int dy = path[0].y - current.y;
-        int dz = path[0].z - current.z;
+        const int dx = path[0].x - current.x;
+        const int dy = path[0].y - current.y;
+        const int dz = path[0].z - current.z;
 
-        for (size_t i = 1; i < std::min(path.size(), (size_t)5); ++i) {
-            if (path[i].x - path[i-1].x == dx &&
-                path[i].y - path[i-1].y == dy &&
-                path[i].z - path[i-1].z == dz) {
+        std::size_t jump_limit = 5;
+        if (confirm_before_enter) {
+            const double max_move_cm = (dz != 0)
+                ? drone_config_.max_elevate.numerical_value_in(cm)
+                : drone_config_.max_advance.numerical_value_in(cm);
+            const auto max_cells = static_cast<std::size_t>(
+                std::max<long long>(1, static_cast<long long>(std::floor(max_move_cm / stepCm()))));
+            jump_limit = std::min(jump_limit, max_cells);
+        }
 
-                if (output_map_.atVoxel(gridToWorld(path[i])) == types::VoxelOccupancy::Empty) {
-                    target_cell = path[i];
-                } else {
-                    break;
-                }
+        for (std::size_t i = 1; i < std::min(path.size(), jump_limit); ++i) {
+            if (path[i].x - path[i - 1].x == dx &&
+                path[i].y - path[i - 1].y == dy &&
+                path[i].z - path[i - 1].z == dz &&
+                output_map_.atVoxel(gridToWorld(path[i])) == types::VoxelOccupancy::Empty) {
+                target_cell = path[i];
             } else {
                 break;
             }
@@ -231,17 +255,61 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
     }
 
     // --- 5. EXECUTE COMMAND ---
+    // Leading-edge confirmation (bounded, non-stranding). When observable, a bodied drone prefers to
+    // scan the voxels NEWLY entering its footprint at target_cell before committing (voxels shared with
+    // the current footprint are reused). But confirmation is BEST-EFFORT: after kMaxScanAttempts scans
+    // of the same cell it enters optimistically anyway rather than abandoning a reachable frontier —
+    // the earlier design blacklisted here and stranded the whole drone. Unobservable leading edges
+    // (radius < z_min) are never gated, so those runs stay identical to pre-Checkpoint-B behaviour.
+    constexpr int kMaxScanAttempts = 1;
+    const bool leading_unconfirmed = confirm_before_enter &&
+        !leadingFootprintClear(output_map_, gridToWorld(current), gridToWorld(target_cell),
+                               drone_config_.radius);
+
+    // Records the 3-element inter-tick state buffer (immediate target, rotate flag, current cell) the
+    // stuck-detector reads next tick. rotate_flag=true marks an intentional non-move (rotate or
+    // scan-before-enter hold) so a legitimate stay-in-place is not mistaken for a blind-wall stall.
+    const auto pushState = [&](bool rotate_flag) {
+        frontier_.push(immediate_step);
+        frontier_.push(GridCell{rotate_flag ? 1 : 0, 0, 0});
+        frontier_.push(current);
+    };
+
+    // Decides whether to hold and scan (instead of moving) this tick, consuming the per-cell scan
+    // budget. Returns false — proceed with the move — when the leading edge is confirmed, unobservable,
+    // or the budget is spent. Never blacklists: a frontier we could not confirm is entered
+    // optimistically, not permanently abandoned.
+    const auto takeScanHold = [&]() -> bool {
+        if (!leading_unconfirmed) {
+            pending_scan_cell_.reset();
+            scan_attempts_ = 0;
+            return false;
+        }
+        const bool same = pending_scan_cell_ && *pending_scan_cell_ == target_cell;
+        const int attempts = same ? scan_attempts_ : 0;
+        if (attempts >= kMaxScanAttempts) {
+            return false; // best effort spent → enter optimistically
+        }
+        pending_scan_cell_ = target_cell;
+        scan_attempts_ = attempts + 1;
+        return true;
+    };
+
     if (target_cell.z != current.z) {
         const double dz_cm = static_cast<double>(target_cell.z - current.z) * stepCm();
-        
-        // Pitch lidar in the direction of elevation
-        double elevate_pitch = (dz_cm > 0) ? 45.0 : -45.0;
-        Orientation elevate_scan{0.0 * horizontal_angle[deg], elevate_pitch * altitude_angle[deg]};
-        
-        frontier_.push(immediate_step); // Store immediate block for accurate blacklisting
-        frontier_.push({0, 0, 0});      // Rotate flag = false
-        frontier_.push(current);
+        if (takeScanHold()) {
+            // The forward beams never see straight up/down, so aim vertically to reveal the cell the
+            // drone is about to rise/descend into before committing the elevate.
+            const double aim_pitch = (dz_cm > 0.0) ? 90.0 : -90.0;
+            pushState(/*rotate_flag=*/true);
+            return {std::nullopt,
+                    Orientation{0.0 * horizontal_angle[deg], aim_pitch * altitude_angle[deg]},
+                    types::AlgorithmStatus::Working};
+        }
 
+        const double elevate_pitch = (dz_cm > 0.0) ? 45.0 : -45.0;
+        Orientation elevate_scan{0.0 * horizontal_angle[deg], elevate_pitch * altitude_angle[deg]};
+        pushState(/*rotate_flag=*/false);
         return {
             types::MovementCommand{
                 types::MovementCommandType::Elevate,
@@ -268,13 +336,12 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
     const double diff = normaliseDiff(desired_heading - cur_heading);
 
     if (std::abs(diff) > kAngleTolDeg) {
-        const types::RotationDirection dir = diff > 0.0 ? types::RotationDirection::Left : types::RotationDirection::Right;
-        double safe_rotate_amount = std::min(std::abs(diff), 45.0);
-        
-        frontier_.push(immediate_step);
-        frontier_.push({1, 0, 0}); // Rotate flag = true
-        frontier_.push(current);
-
+        // Rotate to face the target first; the scan along the way reveals the leading edge in that
+        // direction, so by the time the drone is aligned the cells ahead are usually already confirmed.
+        const types::RotationDirection dir =
+            diff > 0.0 ? types::RotationDirection::Left : types::RotationDirection::Right;
+        const double safe_rotate_amount = std::min(std::abs(diff), 45.0);
+        pushState(/*rotate_flag=*/true);
         return {
             types::MovementCommand{
                 types::MovementCommandType::Rotate,
@@ -287,10 +354,16 @@ types::MappingStepCommand MappingAlgorithmImpl::nextStep(
         };
     }
 
-    frontier_.push(immediate_step);
-    frontier_.push({0, 0, 0}); // Rotate flag = false
-    frontier_.push(current);
-
+    // Facing the target: best-effort confirm the leading edge before advancing (a level forward scan
+    // reveals exactly the cells the move enters). Falls through to Advance when confirmed, unobservable,
+    // or the scan budget is spent.
+    if (takeScanHold()) {
+        pushState(/*rotate_flag=*/true);
+        return {std::nullopt,
+                Orientation{0.0 * horizontal_angle[deg], 0.0 * altitude_angle[deg]},
+                types::AlgorithmStatus::Working};
+    }
+    pushState(/*rotate_flag=*/false);
     return {
         types::MovementCommand{
             types::MovementCommandType::Advance,

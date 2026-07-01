@@ -367,18 +367,24 @@ TEST_F(MappingAlgorithm, OccupiedVoxelNeverSelectedAsTarget) {
     EXPECT_EQ(cmd.movement->type, drone_mapper::types::MovementCommandType::Elevate);
 }
 
-// A PotentiallyOccupied neighbour is treated as an obstacle too (collision safety): +X marked
-// PotentiallyOccupied and ±Y/-X occupied → only ±Z remains → Elevate.
-TEST_F(MappingAlgorithm, PotentiallyOccupiedNeverSelectedAsTarget) {
+// PotentiallyOccupied is PASSABLE uncertainty, not a hard obstacle (it only means a hit closer than
+// z_min, so the voxel is unknown — not a confirmed wall). With every other neighbour walled off, the
+// drone must still route THROUGH the PotentiallyOccupied cell to reach the Unmapped frontier beyond
+// it, rather than declaring itself stuck. MockMovement (hidden map) is the real collision guard.
+TEST_F(MappingAlgorithm, PotentiallyOccupiedIsPassableNotAnObstacle) {
     using V = drone_mapper::types::VoxelOccupancy;
-    map_.setVoxel(posAt(0, 0, 10), V::Empty); // the one open neighbour, confirmed → Elevate
-    map_.setVoxel(posAt( 10, 0, 0), V::PotentiallyOccupied);
+    map_.setVoxel(posAt( 10, 0, 0), V::PotentiallyOccupied); // only opening → leads to Unmapped +X
     map_.setVoxel(posAt(-10, 0, 0), V::Occupied);
     map_.setVoxel(posAt(0,  10, 0), V::Occupied);
     map_.setVoxel(posAt(0, -10, 0), V::Occupied);
+    map_.setVoxel(posAt(0, 0,  10), V::Occupied);
+    map_.setVoxel(posAt(0, 0, -10), V::Occupied);
     const auto cmd = algo_.nextStep(stateAt(5, 5, 5), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working)
+        << "planner must traverse PotentiallyOccupied, not treat it as a wall and give up";
     ASSERT_TRUE(cmd.movement.has_value());
-    EXPECT_EQ(cmd.movement->type, drone_mapper::types::MovementCommandType::Elevate);
+    EXPECT_EQ(cmd.movement->type, drone_mapper::types::MovementCommandType::Advance)
+        << "it heads +X (heading 0) through the PotentiallyOccupied cell toward the frontier";
 }
 
 // A cell occupied AFTER being enqueued must be skipped when popped: leave +X and +Z open on visit
@@ -584,8 +590,14 @@ TestMap makeChamberWithNarrowExit() {
     return m;
 }
 
-// Drives the algorithm from a start cell-centre and records every grid cell the drone occupies.
+// Drives the algorithm from a start cell-centre and records every grid cell the drone occupies. The
+// map is passed by non-const reference so a scan command can be simulated: leading-edge scan-before-
+// enter (Checkpoint B) refuses to move a bodied drone into an Unmapped frontier until a scan reveals
+// it, so here a scan marks the currently-Unmapped 6-neighbours of the drone's cell Empty — mirroring
+// the real system, where the lidar maps a cell before the next move enters it. Without this a bodied
+// drone could never leave its start cell in this scan-less kinematic harness.
 std::set<std::tuple<int, int, int>> reachedCells(drone_mapper::MappingAlgorithmImpl& algo,
+                                                 TestMap& map,
                                                  double x0, double y0, double z0, int cap = 4000) {
     using namespace drone_mapper;
     using T = types::MovementCommandType;
@@ -600,6 +612,19 @@ std::set<std::tuple<int, int, int>> reachedCells(drone_mapper::MappingAlgorithmI
     for (int i = 0; i < cap; ++i) {
         const auto cmd = algo.nextStep(stateAt(x, y, z, heading), nullptr);
         if (cmd.status == types::AlgorithmStatus::Finished) break;
+        if (cmd.scan_orientation) {
+            const int gx = static_cast<int>(std::floor(x));
+            const int gy = static_cast<int>(std::floor(y));
+            const int gz = static_cast<int>(std::floor(z));
+            const int nb[6][3] = {{gx + 1, gy, gz}, {gx - 1, gy, gz}, {gx, gy + 1, gz},
+                                  {gx, gy - 1, gz}, {gx, gy, gz + 1}, {gx, gy, gz - 1}};
+            for (const auto& n : nb) {
+                const Position3D p = posAt(n[0], n[1], n[2]);
+                if (map.atVoxel(p) == types::VoxelOccupancy::Unmapped) {
+                    map.setVoxel(p, types::VoxelOccupancy::Empty);
+                }
+            }
+        }
         if (cmd.movement) {
             const auto& mv = *cmd.movement;
             if (mv.type == T::Rotate) {
@@ -681,14 +706,143 @@ TEST_F(MappingAlgorithm, DifferentDroneSizesReachDifferentAreas) {
     TestMap chamber_small = makeChamberWithNarrowExit();
     DroneConfigData d_small = droneWithRadius(0.5);
     drone_mapper::MappingAlgorithmImpl algo_small{mc, lc, d_small, chamber_small};
-    const auto reached_small = reachedCells(algo_small, 2.5, 2.5, 2.5);
+    const auto reached_small = reachedCells(algo_small, chamber_small, 2.5, 2.5, 2.5);
 
     TestMap chamber_large = makeChamberWithNarrowExit();
     DroneConfigData d_large = droneWithRadius(1.0);
     drone_mapper::MappingAlgorithmImpl algo_large{mc, lc, d_large, chamber_large};
-    const auto reached_large = reachedCells(algo_large, 2.5, 2.5, 2.5);
+    const auto reached_large = reachedCells(algo_large, chamber_large, 2.5, 2.5, 2.5);
 
     EXPECT_TRUE(reachedBeyondX(reached_small, 4)) << "small drone should escape the chamber";
     EXPECT_FALSE(reachedBeyondX(reached_large, 4)) << "large drone must stay confined";
     EXPECT_GT(reached_small.size(), reached_large.size());
+}
+
+// Leading-edge scan-before-enter (Checkpoint B) ------------------------------------------------
+
+// A bodied drone standing at a confirmed-Empty cell whose next step is an Unmapped frontier must NOT
+// move into it blind: it emits a scan-only command (no movement) so the cell is mapped first.
+TEST_F(MappingAlgorithm, BodiedDroneScansBeforeEnteringUnmappedFrontier) {
+    using V = drone_mapper::types::VoxelOccupancy;
+    TestMap m{1.0};
+    m.setGridBounds(0, 6);
+    m.setVoxel(posAt(1, 1, 1), V::Empty); // start cell confirmed; +X neighbour (2,1,1) left Unmapped
+
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    DroneConfigData   d = droneWithRadius(0.5);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, m};
+
+    const auto cmd = algo.nextStep(stateAt(1.5, 1.5, 1.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working);
+    EXPECT_FALSE(cmd.movement.has_value())
+        << "bodied drone must scan before entering an unmapped frontier";
+    EXPECT_TRUE(cmd.scan_orientation.has_value()) << "and it must actually request a scan";
+}
+
+// When the destination's newly-entered footprint voxels are already confirmed Empty, the bodied drone
+// commits the move (here: advances) instead of scanning — leading-edge confirmation is satisfied.
+TEST_F(MappingAlgorithm, BodiedDroneAdvancesWhenLeadingEdgeConfirmedEmpty) {
+    using V = drone_mapper::types::VoxelOccupancy;
+    TestMap m{1.0};
+    m.setGridBounds(0, 6);
+    // A 1-wide +X corridor of confirmed-Empty cells to an Unmapped frontier; walls on every side so the
+    // only route is straight ahead through cells that are already Empty (immediate step is confirmed).
+    const int walls[9][3] = {{0,1,1},{1,0,1},{1,2,1},{1,1,0},{1,1,2},
+                             {2,0,1},{2,2,1},{2,1,0},{2,1,2}};
+    for (const auto& w : walls) m.setVoxel(posAt(w[0], w[1], w[2]), V::Occupied);
+    m.setVoxel(posAt(1, 1, 1), V::Empty);
+    m.setVoxel(posAt(2, 1, 1), V::Empty); // (3,1,1) stays Unmapped = the frontier being sought
+
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    DroneConfigData   d = droneWithRadius(0.5);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, m};
+
+    const auto cmd = algo.nextStep(stateAt(1.5, 1.5, 1.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working);
+    ASSERT_TRUE(cmd.movement.has_value()) << "confirmed-Empty leading edge → drone moves, not scans";
+    EXPECT_EQ(cmd.movement->type, drone_mapper::types::MovementCommandType::Advance);
+}
+
+// A point drone (radius 0) keeps the optimistic behaviour: it moves straight into an Unmapped frontier
+// without a scan-before-enter hold, so Checkpoint B does not regress the point-drone path.
+TEST_F(MappingAlgorithm, PointDroneEntersUnmappedFrontierWithoutScanning) {
+    using V = drone_mapper::types::VoxelOccupancy;
+    TestMap m{1.0};
+    m.setGridBounds(0, 6);
+    m.setVoxel(posAt(1, 1, 1), V::Empty);
+
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    DroneConfigData   d = droneWithRadius(0.0);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, m};
+
+    const auto cmd = algo.nextStep(stateAt(1.5, 1.5, 1.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working);
+    EXPECT_TRUE(cmd.movement.has_value())
+        << "point drone must keep optimistic entry (no scan-before-enter)";
+}
+
+// Confirms the pre-existing large-drone failure mode AND its fix: a bodied drone whose FOOTPRINT (not
+// just its own cell) clips a PotentiallyOccupied voxel is no longer rejected. Every route but +X is
+// walled off, and the +X frontier cell's footprint (radius 0.6 → centre + 6 faces) includes a
+// PotentiallyOccupied cell. Under the old "PO is a hard obstacle" rule isNavigable rejected it and the
+// planner declared itself stuck after one step — the drone_large + long-range-lidar 3-step bug, where
+// the near-field PO shell the first scans paint blankets the big footprint. Now it navigates through;
+// MockMovement (hidden map) remains the collision guard. z_min > radius keeps scan-before-enter off.
+TEST_F(MappingAlgorithm, BodiedDroneNavigatesWhenFootprintClipsPotentiallyOccupied) {
+    using V = drone_mapper::types::VoxelOccupancy;
+    TestMap m{1.0};
+    m.setGridBounds(0, 6);
+    m.setVoxel(posAt(1, 2, 2), V::Occupied); // wall off every neighbour of (2,2,2) except +X
+    m.setVoxel(posAt(2, 3, 2), V::Occupied);
+    m.setVoxel(posAt(2, 1, 2), V::Occupied);
+    m.setVoxel(posAt(2, 2, 3), V::Occupied);
+    m.setVoxel(posAt(2, 2, 1), V::Occupied);
+    m.setVoxel(posAt(4, 2, 2), V::PotentiallyOccupied); // sits inside the +X frontier cell's footprint
+
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+    lc.z_min = 100.0 * drone_mapper::cm; // z_min > radius → scan-before-enter inactive (pure optimistic)
+    DroneConfigData   d = droneWithRadius(0.6);
+    drone_mapper::MappingAlgorithmImpl algo{mc, lc, d, m};
+
+    const auto cmd = algo.nextStep(stateAt(2.5, 2.5, 2.5, 0.0), nullptr);
+    EXPECT_EQ(cmd.status, drone_mapper::types::AlgorithmStatus::Working)
+        << "a footprint clipping PotentiallyOccupied must not strand the drone";
+    ASSERT_TRUE(cmd.movement.has_value());
+    EXPECT_EQ(cmd.movement->type, drone_mapper::types::MovementCommandType::Advance);
+}
+
+// Documents the small_simulation_room + drone_large outcome as CORRECT physics, not a planner bug: a
+// 15cm drone (radius 7.5, res 10) that starts one cell above a solid floor (z=0) and one cell from a
+// solid wall (y=0) has a footprint that overlaps both — and so does every neighbour's footprint — so
+// no frontier is navigable and it maps nothing. The same start with the small drone (radius 4, a
+// single-cell footprint) is fine, which is why only the large drone scores ~0 in that room.
+TEST_F(MappingAlgorithm, LargeDroneWedgedAgainstFloorAndWallFindsNoFrontier) {
+    using V = drone_mapper::types::VoxelOccupancy;
+    TestMap m{10.0};
+    m.setGridBounds(0, 9);
+    for (int x = 0; x <= 9; ++x)
+        for (int a = 0; a <= 9; ++a) {
+            m.setVoxel(posAt(x * 10.0, a * 10.0, 0.0), V::Occupied); // floor plane z=0
+            m.setVoxel(posAt(x * 10.0, 0.0, a * 10.0), V::Occupied); // wall plane y=0
+        }
+    MissionConfigData mc{};
+    LidarConfigData   lc{};
+
+    // Large drone: wedged in the floor/wall corner → footprint fits nowhere reachable → Finished.
+    DroneConfigData large = droneWithRadius(7.5);
+    drone_mapper::MappingAlgorithmImpl algo_large{mc, lc, large, m};
+    const auto cmd_large = algo_large.nextStep(stateAt(55, 15, 15, 0.0), nullptr);
+    EXPECT_EQ(cmd_large.status, drone_mapper::types::AlgorithmStatus::Finished)
+        << "the large footprint overlaps floor+wall from every neighbour — no navigable frontier";
+
+    // Small drone from the identical start is not boxed in and keeps exploring.
+    DroneConfigData small = droneWithRadius(4.0);
+    drone_mapper::MappingAlgorithmImpl algo_small{mc, lc, small, m};
+    const auto cmd_small = algo_small.nextStep(stateAt(55, 15, 15, 0.0), nullptr);
+    EXPECT_EQ(cmd_small.status, drone_mapper::types::AlgorithmStatus::Working)
+        << "the small single-cell footprint fits and finds a frontier from the same start";
 }

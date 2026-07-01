@@ -406,10 +406,21 @@ TEST_F(DroneControl, ElevateClampedWhenAboveMax) {
     (void)drone_->step();
 }
 
+// A sub-cell request is floored to whole cells (never rounded up), so it never exceeds the requested
+// magnitude, and the descent sign is preserved: -15cm at 10cm resolution → 1 cell = -10cm (not -20).
 TEST_F(DroneControl, ElevateNegativeSignPreserved) {
     using namespace ::testing;
     ON_CALL(*algo_, nextStep(_, _)).WillByDefault(Return(elevateStepCmd(-15.0)));
-    EXPECT_CALL(movement_, elevate(CmEq(-20.0))).Times(1);
+    EXPECT_CALL(movement_, elevate(CmEq(-10.0))).Times(1);
+    (void)drone_->step();
+}
+
+// floor (not round): a request between cell multiples is truncated DOWN so the executed move never
+// exceeds the requested/validated distance. 25cm at 10cm resolution → 2 cells = 20cm (round would give 30).
+TEST_F(DroneControl, AdvanceFlooredToWholeCellsNeverExceedsRequest) {
+    using namespace ::testing;
+    ON_CALL(*algo_, nextStep(_, _)).WillByDefault(Return(advanceStepCmd(25.0)));
+    EXPECT_CALL(movement_, advance(CmEq(20.0))).Times(1);
     (void)drone_->step();
 }
 

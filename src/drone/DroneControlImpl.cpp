@@ -14,14 +14,20 @@ namespace {
 // Clamps a requested move to a WHOLE number of grid cells that fits within the per-command limit, so
 // a move starting at a cell centre lands exactly on another cell centre (planner/execution geometry
 // agree). Returns the distance in cm: min(requested_cells, floor(max/res)) * res. With res <= 0 it
-// degrades to the plain continuous clamp. For limits that are integer multiples of the resolution
-// (the common case) this equals the previous min(requested, max) clamp.
+// degrades to the plain continuous clamp.
+//
+// Both the requested and the max distance are floored (never rounded up), so the executed move is
+// GUARANTEED never to exceed the requested/validated distance — a half-cell request (e.g. 15cm at
+// 10cm resolution) yields 1 whole cell, not 2. A tiny epsilon absorbs floating-point noise so an
+// exact N*res request still floors to N rather than N-1. For requests that are integer multiples of
+// the resolution (the common case, since the planner targets cell centres) the result is unchanged.
 double cellAlignedDistanceCm(double requested_cm, double max_cm, double res_cm) {
     if (res_cm <= 0.0) {
         return std::min(requested_cm, max_cm);
     }
-    const long long req_cells = std::llround(requested_cm / res_cm);
-    const long long max_cells = static_cast<long long>(std::floor(max_cm / res_cm));
+    constexpr double kCellEps = 1e-6;
+    const long long req_cells = static_cast<long long>(std::floor(requested_cm / res_cm + kCellEps));
+    const long long max_cells = static_cast<long long>(std::floor(max_cm / res_cm + kCellEps));
     const long long cells = std::min(req_cells, std::max<long long>(0, max_cells));
     return static_cast<double>(cells) * res_cm;
 }
